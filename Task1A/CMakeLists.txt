@@ -1,6 +1,6 @@
 ﻿cmake_minimum_required (VERSION 3.8)
 
-include(doctest)
+include (doctest)
 
 add_executable (Task1A "Task1A.cpp")
 

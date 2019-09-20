@@ -397,3 +397,4 @@ CTestTestfile.cmake
 _deps
 
 /out
+/CMakeSettings.json
