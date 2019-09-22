@@ -6,6 +6,23 @@
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
 #include <doctest/doctest.h>
+
+// Only one per TEST_CASE is possible! (due to the use of static variables)
+#define DOCTEST_INDEX_PARAMETERIZED_DATA(data, from, to)                                    \
+    const std::size_t _doctest_subcase_count = (to) - (from) + 1;                           \
+    static std::vector<std::string> _doctest_subcases = [&_doctest_subcase_count]() {       \
+        std::vector<std::string> out;                                                       \
+        while(out.size() != _doctest_subcase_count)                                         \
+            out.push_back(std::string(#data " := ") + std::to_string((from) + out.size())); \
+        return out;                                                                         \
+    }();                                                                                    \
+    std::size_t _doctest_subcase_idx = 0;                                                   \
+    for (; _doctest_subcase_idx < _doctest_subcase_count; _doctest_subcase_idx++) {         \
+        DOCTEST_SUBCASE(_doctest_subcases[_doctest_subcase_idx].c_str()) {                  \
+            data = static_cast<decltype(data)>((from) + _doctest_subcase_idx);              \
+        }                                                                                   \
+    }                                                                                       \
+    DOCTEST_CAPTURE(data);
 #endif
 
 using storage_type = std::int64_t;
@@ -34,7 +51,18 @@ struct zero_fill_t
 
 const zero_fill_t zero_fill;
 
-struct diagonal_fill_with final
+// cppcoreguidelines check is stupid, it thinks this class contains non-default constructor
+// it even continues to think so when "<...> = default;" constructor is removed
+
+struct diagonal_fill_t  // NOLINT(cppcoreguidelines-special-member-functions)
+{
+    diagonal_fill_t() = default;
+    virtual ~diagonal_fill_t() = default;
+
+    virtual storage_type operator[](std::size_t index) const noexcept = 0;
+};
+
+struct diagonal_fill_with final : diagonal_fill_t
 {
     storage_type value;
 
@@ -42,16 +70,40 @@ struct diagonal_fill_with final
     {
     }
 
-    ~diagonal_fill_with() = default;
+    ~diagonal_fill_with() override = default;
 
     diagonal_fill_with(const diagonal_fill_with& other) = default;
     diagonal_fill_with(diagonal_fill_with&& other) noexcept = default;
+    diagonal_fill_with& operator=(const diagonal_fill_with& other) = default;
+    diagonal_fill_with& operator=(diagonal_fill_with&& other) noexcept = default;
 
-    diagonal_fill_with& operator=(diagonal_fill_with other)
+    storage_type operator[](const std::size_t) const noexcept override
     {
-        using std::swap;
-        swap(*this, other);
-        return *this;
+        return value;
+    }
+};
+
+struct diagonal_fill_from final : diagonal_fill_t
+{
+    const storage_type* value;
+
+    explicit diagonal_fill_from(const storage_type (&value)[]) : value(value)
+    {
+        // Note: diagonal_fill_from is unsafe (no bounds checking)
+        // It can be made much safer using compile-time calculated sizes
+        // But that requires some templating, which is absolutely & unfortunately not part of the first task
+    }
+
+    ~diagonal_fill_from() override = default;
+
+    diagonal_fill_from(const diagonal_fill_from& other) = default;
+    diagonal_fill_from(diagonal_fill_from&& other) noexcept = default;
+    diagonal_fill_from& operator=(const diagonal_fill_from& other) = default;
+    diagonal_fill_from& operator=(diagonal_fill_from&& other) noexcept = default;
+
+    storage_type operator[](const std::size_t index) const noexcept override
+    {
+        return value[index];
     }
 };
 
@@ -67,13 +119,8 @@ struct complete_fill_with final
 
     complete_fill_with(const complete_fill_with& other) = default;
     complete_fill_with(complete_fill_with&& other) noexcept = default;
-
-    complete_fill_with& operator=(complete_fill_with other)
-    {
-        using std::swap;
-        swap(*this, other);
-        return *this;
-    }
+    complete_fill_with& operator=(const complete_fill_with& other) = default;
+    complete_fill_with& operator=(complete_fill_with&& other) noexcept = default;
 };
 
 // Note: template class
@@ -83,11 +130,12 @@ class Matrix final
     // Note: using storage_type = <...>
     // Note: using size_type = <...>
 
-    const std::size_t size_ = 0;
+    std::size_t size_ = 0;
     storage_type** storage_ = nullptr;
 
     explicit Matrix(std::size_t n) : size_(n), storage_(new storage_type* [n])
     {
+        assert(n >= 1);
     }
 
 public:
@@ -113,28 +161,28 @@ public:
         default_random_engine random(random_seed());
         const std::uniform_int_distribution<storage_type> distribution(storage_type_min, storage_type_max);
 
-        for (std::size_t i = 0; i < size(); i++)
+        for (std::size_t i = 0; i < n; i++)
         {
-            for (std::size_t j = 0; j < size(); j++)
+            for (std::size_t j = 0; j < n; j++)
             {
                 this->storage_[i][j] = distribution(random);
             }
         }
     }
 
-    Matrix(std::size_t n, const diagonal_fill_with& value) : Matrix(n, zero_fill)
+    Matrix(std::size_t n, const diagonal_fill_t& value) : Matrix(n, zero_fill)
     {
-        for (std::size_t i = 0; i < size(); i++)
+        for (std::size_t i = 0; i < n; i++)
         {
-            this->storage_[i][i] = value.value;
+            this->storage_[i][i] = value[i];
         }
     }
 
     Matrix(std::size_t n, const complete_fill_with& value) : Matrix(n, default_fill)
     {
-        for (std::size_t i = 0; i < size(); i++)
+        for (std::size_t i = 0; i < n; i++)
         {
-            for (std::size_t j = 0; j < size(); j++)
+            for (std::size_t j = 0; j < n; j++)
             {
                 this->storage_[i][j] = value.value;
             }
@@ -157,7 +205,9 @@ public:
     ~Matrix()
     {
         if (this->storage_ == nullptr)
+        {
             return;
+        }
 
         for (std::size_t i = 0; i < size(); i++)
         {
@@ -177,6 +227,8 @@ public:
     storage_type& operator()(std::size_t row, std::size_t column)
     {
         assert(this->storage_ != nullptr);
+        assert(row < size());
+        assert(column < size());
 
         return this->storage_[row][column];
     }
@@ -184,14 +236,22 @@ public:
     const storage_type& operator()(std::size_t row, std::size_t column) const
     {
         assert(this->storage_ != nullptr);
+        assert(row < size());
+        assert(column < size());
 
         return this->storage_[row][column];
     }
 
-    Matrix& operator=(Matrix other)
+    void swap(Matrix& that) noexcept
     {
         using std::swap;
-        swap(*this, other);
+        swap(this->size_, that.size_);
+        swap(this->storage_, that.storage_);
+    }
+
+    Matrix& operator=(Matrix other) noexcept
+    {
+        swap(other);
         return *this;
     }
 
@@ -303,7 +363,9 @@ std::ostream& operator<<(std::ostream& out, Matrix& matrix)
         for (std::size_t j = 0; j < n; j++)
         {
             if (j != 0)
+            {
                 out << ' ';
+            }
 
             out << matrix(i, j);
         }
@@ -322,10 +384,18 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
     context.applyCommandLine(argc, argv);
     const auto res = context.run();
     if (context.shouldExit())
+    {
         return res;
+    }
 #endif
 
     std::ifstream fin("input.txt");
+
+    if (!fin.is_open())
+    {
+        return 0;
+    }
+
     std::ofstream fout("output.txt");
 
     std::size_t n;
@@ -350,6 +420,37 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
 }
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
+void check_element_modification(Matrix& m)
+{
+    m(4, 4) = INT64_MAX;
+
+    CHECK_EQ(m.size(), 5);
+    CHECK_EQ(m(4, 4), INT64_MAX);
+}
+void check_manual_fill(Matrix& m)
+{
+    CHECK_EQ(m.size(), 5);
+
+    for (std::size_t i = 0; i < m.size(); i++)
+    {
+        for (std::size_t j = 0; j < m.size(); j++)
+        {
+            m(i, j) = i + j;
+        }
+    }
+
+    CHECK_EQ(m.size(), 5);
+    CHECK_NE(m(4, 4), INT64_MAX);
+
+    for (std::size_t i = 0; i < m.size(); i++)
+    {
+        for (std::size_t j = 0; j < m.size(); j++)
+        {
+            CHECK_EQ(m(i, j), i + j);
+        }
+    }
+}
+
 TEST_CASE("matrices can be created with default fill")
 {
     Matrix m(5, default_fill);
@@ -358,34 +459,12 @@ TEST_CASE("matrices can be created with default fill")
 
     SUBCASE("modifying the element works")
     {
-        m(4, 4) = INT64_MAX;
-
-        CHECK_EQ(m.size(), 5);
-        CHECK_EQ(m(4, 4), INT64_MAX);
+        check_element_modification(m);
     }
 
     SUBCASE("manual filling works")
     {
-        CHECK_EQ(m.size(), 5);
-
-        for (std::size_t i = 0; i < m.size(); i++)
-        {
-            for (std::size_t j = 0; j < m.size(); j++)
-            {
-                m(i, j) = i + j;
-            }
-        }
-
-        CHECK_EQ(m.size(), 5);
-        CHECK_NE(m(4, 4), INT64_MAX);
-
-        for (std::size_t i = 0; i < m.size(); i++)
-        {
-            for (std::size_t j = 0; j < m.size(); j++)
-            {
-                CHECK_EQ(m(i, j), i + j);
-            }
-        }
+        check_manual_fill(m);
     }
 }
 
@@ -405,34 +484,12 @@ TEST_CASE("matrices can be created with zero fill")
 
     SUBCASE("modifying the element works")
     {
-        m(4, 4) = INT64_MAX;
-
-        CHECK_EQ(m.size(), 5);
-        CHECK_EQ(m(4, 4), INT64_MAX);
+        check_element_modification(m);
     }
 
     SUBCASE("manual filling works")
     {
-        CHECK_EQ(m.size(), 5);
-
-        for (std::size_t i = 0; i < m.size(); i++)
-        {
-            for (std::size_t j = 0; j < m.size(); j++)
-            {
-                m(i, j) = i + j;
-            }
-        }
-
-        CHECK_EQ(m.size(), 5);
-        CHECK_NE(m(4, 4), INT64_MAX);
-
-        for (std::size_t i = 0; i < m.size(); i++)
-        {
-            for (std::size_t j = 0; j < m.size(); j++)
-            {
-                CHECK_EQ(m(i, j), i + j);
-            }
-        }
+        check_manual_fill(m);
     }
 }
 
@@ -444,45 +501,23 @@ TEST_CASE("matrices can be created with random fill")
 
     SUBCASE("modifying the element works")
     {
-        m(4, 4) = INT64_MAX;
-
-        CHECK_EQ(m.size(), 5);
-        CHECK_EQ(m(4, 4), INT64_MAX);
+        check_element_modification(m);
     }
 
     SUBCASE("manual filling works")
     {
-        CHECK_EQ(m.size(), 5);
-
-        for (std::size_t i = 0; i < m.size(); i++)
-        {
-            for (std::size_t j = 0; j < m.size(); j++)
-            {
-                m(i, j) = i + j;
-            }
-        }
-
-        CHECK_EQ(m.size(), 5);
-        CHECK_NE(m(4, 4), INT64_MAX);
-
-        for (std::size_t i = 0; i < m.size(); i++)
-        {
-            for (std::size_t j = 0; j < m.size(); j++)
-            {
-                CHECK_EQ(m(i, j), i + j);
-            }
-        }
+        check_manual_fill(m);
     }
 }
 
 TEST_CASE("matrices can be copied")
 {
-    Matrix m(5, random_fill);
-
-    REQUIRE_EQ(m.size(), 5);
-
-    SUBCASE("copied matrices is identical")
+    SUBCASE("copy-initialized matrices is identical")
     {
+        Matrix m(5, random_fill);
+
+        REQUIRE_EQ(m.size(), 5);
+
         const auto m2 = m;
 
         CHECK_EQ(m.size(), m2.size());
@@ -493,6 +528,32 @@ TEST_CASE("matrices can be copied")
             {
                 CHECK_EQ(m(i, j), m2(i, j));
             }
+        }
+    }
+
+}
+
+TEST_CASE("matrices are copy-assigned correctly")
+{
+    std::size_t n = 0;
+    DOCTEST_INDEX_PARAMETERIZED_DATA(n, 1, 50);
+
+    // Ensure there is no dependency on operator= within operator= implementation,
+    // either directly, or via std::swap. The test will fail with stack overflow in case this is violated.
+    // Note that this guarantee must still hold when Copy & Swap idiom is used.
+
+    Matrix a(n, default_fill);
+    Matrix b(n, default_fill);
+    a = b;
+
+    CHECK_EQ(a.size(), n);
+    CHECK_EQ(b.size(), n);
+
+    for (std::size_t i = 0; i < n; i++)
+    {
+        for (std::size_t j = 0; j < n; j++)
+        {
+            CHECK_EQ(a(i, j), b(i, j));
         }
     }
 }
@@ -575,54 +636,54 @@ TEST_CASE("matrices can be multiplied")
         CHECK_EQ(a.size(), c.size());
         CHECK_EQ(b.size(), c.size());
     }
+}
 
-    SUBCASE("2x2 matrices multiplication works")
-    {
-        for (auto i = 0; i < 50; i++)
-        {
-            Matrix a(2, random_fill);
-            Matrix b(2, random_fill);
+TEST_CASE("2x2 matrices multiplication works")
+{
+    int i = 0;
+    DOCTEST_INDEX_PARAMETERIZED_DATA(i, 1, 50);
 
-            CHECK_EQ(a.size(), 2);
-            CHECK_EQ(b.size(), 2);
+    Matrix a(2, random_fill);
+    Matrix b(2, random_fill);
 
-            auto c = a * b;
+    CHECK_EQ(a.size(), 2);
+    CHECK_EQ(b.size(), 2);
 
-            CHECK_EQ(a.size(), c.size());
-            CHECK_EQ(b.size(), c.size());
+    auto c = a * b;
 
-            CHECK_EQ(c(0, 0), a(0, 0) * b(0, 0) + a(0, 1) * b(1, 0));
-            CHECK_EQ(c(0, 1), a(0, 0) * b(0, 1) + a(0, 1) * b(1, 1));
-            CHECK_EQ(c(1, 0), a(1, 0) * b(0, 0) + a(1, 1) * b(1, 0));
-            CHECK_EQ(c(1, 1), a(1, 0) * b(0, 1) + a(1, 1) * b(1, 1));
-        }
-    }
+    CHECK_EQ(a.size(), c.size());
+    CHECK_EQ(b.size(), c.size());
 
-    SUBCASE("3x3 matrices multiplication works")
-    {
-        for (auto i = 0; i < 50; i++)
-        {
-            Matrix a(3, random_fill);
-            Matrix b(3, random_fill);
+    CHECK_EQ(c(0, 0), a(0, 0) * b(0, 0) + a(0, 1) * b(1, 0));
+    CHECK_EQ(c(0, 1), a(0, 0) * b(0, 1) + a(0, 1) * b(1, 1));
+    CHECK_EQ(c(1, 0), a(1, 0) * b(0, 0) + a(1, 1) * b(1, 0));
+    CHECK_EQ(c(1, 1), a(1, 0) * b(0, 1) + a(1, 1) * b(1, 1));
+}
 
-            CHECK_EQ(a.size(), 3);
-            CHECK_EQ(b.size(), 3);
+TEST_CASE("3x3 matrices multiplication works")
+{
+    int i = 0;
+    DOCTEST_INDEX_PARAMETERIZED_DATA(i, 1, 50);
 
-            auto c = a * b;
+    Matrix a(3, random_fill);
+    Matrix b(3, random_fill);
 
-            CHECK_EQ(a.size(), c.size());
-            CHECK_EQ(b.size(), c.size());
+    CHECK_EQ(a.size(), 3);
+    CHECK_EQ(b.size(), 3);
 
-            CHECK_EQ(c(0, 0), a(0, 0) * b(0, 0) + a(0, 1) * b(1, 0) + a(0, 2) * b(2, 0));
-            CHECK_EQ(c(0, 1), a(0, 0) * b(0, 1) + a(0, 1) * b(1, 1) + a(0, 2) * b(2, 1));
-            CHECK_EQ(c(0, 2), a(0, 0) * b(0, 2) + a(0, 1) * b(1, 2) + a(0, 2) * b(2, 2));
-            CHECK_EQ(c(1, 0), a(1, 0) * b(0, 0) + a(1, 1) * b(1, 0) + a(1, 2) * b(2, 0));
-            CHECK_EQ(c(1, 1), a(1, 0) * b(0, 1) + a(1, 1) * b(1, 1) + a(1, 2) * b(2, 1));
-            CHECK_EQ(c(1, 2), a(1, 0) * b(0, 2) + a(1, 1) * b(1, 2) + a(1, 2) * b(2, 2));
-            CHECK_EQ(c(2, 0), a(2, 0) * b(0, 0) + a(2, 1) * b(1, 0) + a(2, 2) * b(2, 0));
-            CHECK_EQ(c(2, 1), a(2, 0) * b(0, 1) + a(2, 1) * b(1, 1) + a(2, 2) * b(2, 1));
-            CHECK_EQ(c(2, 2), a(2, 0) * b(0, 2) + a(2, 1) * b(1, 2) + a(2, 2) * b(2, 2));
-        }
-    }
+    auto c = a * b;
+
+    CHECK_EQ(a.size(), c.size());
+    CHECK_EQ(b.size(), c.size());
+
+    CHECK_EQ(c(0, 0), a(0, 0) * b(0, 0) + a(0, 1) * b(1, 0) + a(0, 2) * b(2, 0));
+    CHECK_EQ(c(0, 1), a(0, 0) * b(0, 1) + a(0, 1) * b(1, 1) + a(0, 2) * b(2, 1));
+    CHECK_EQ(c(0, 2), a(0, 0) * b(0, 2) + a(0, 1) * b(1, 2) + a(0, 2) * b(2, 2));
+    CHECK_EQ(c(1, 0), a(1, 0) * b(0, 0) + a(1, 1) * b(1, 0) + a(1, 2) * b(2, 0));
+    CHECK_EQ(c(1, 1), a(1, 0) * b(0, 1) + a(1, 1) * b(1, 1) + a(1, 2) * b(2, 1));
+    CHECK_EQ(c(1, 2), a(1, 0) * b(0, 2) + a(1, 1) * b(1, 2) + a(1, 2) * b(2, 2));
+    CHECK_EQ(c(2, 0), a(2, 0) * b(0, 0) + a(2, 1) * b(1, 0) + a(2, 2) * b(2, 0));
+    CHECK_EQ(c(2, 1), a(2, 0) * b(0, 1) + a(2, 1) * b(1, 1) + a(2, 2) * b(2, 1));
+    CHECK_EQ(c(2, 2), a(2, 0) * b(0, 2) + a(2, 1) * b(1, 2) + a(2, 2) * b(2, 2));
 }
 #endif
