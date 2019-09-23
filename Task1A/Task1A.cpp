@@ -54,7 +54,7 @@ const zero_fill_t zero_fill;
 // cppcoreguidelines check is stupid, it thinks this class contains non-default constructor
 // it even continues to think so when "<...> = default;" constructor is removed
 
-struct diagonal_fill_t  // NOLINT(cppcoreguidelines-special-member-functions)
+struct diagonal_fill_t // NOLINT(cppcoreguidelines-special-member-functions)
 {
     diagonal_fill_t() = default;
     virtual ~diagonal_fill_t() = default;
@@ -133,7 +133,7 @@ class Matrix final
     std::size_t size_ = 0;
     storage_type** storage_ = nullptr;
 
-    explicit Matrix(std::size_t n) : size_(n), storage_(new storage_type* [n])
+    explicit Matrix(const std::size_t n) : size_(n), storage_(new storage_type* [n])
     {
         assert(n >= 1);
     }
@@ -224,7 +224,7 @@ public:
         return this->size_;
     }
 
-    storage_type& operator()(std::size_t row, std::size_t column)
+    storage_type& operator()(const std::size_t row, const std::size_t column)
     {
         assert(this->storage_ != nullptr);
         assert(row < size());
@@ -233,13 +233,73 @@ public:
         return this->storage_[row][column];
     }
 
-    const storage_type& operator()(std::size_t row, std::size_t column) const
+    const storage_type& operator()(const std::size_t row, const std::size_t column) const
     {
         assert(this->storage_ != nullptr);
         assert(row < size());
         assert(column < size());
 
         return this->storage_[row][column];
+    }
+
+    class RowProxy final
+    {
+        const Matrix* container_ = nullptr;
+        storage_type* row_ = nullptr;
+
+        friend Matrix;
+
+        RowProxy(const Matrix* const container, storage_type* const row)
+            : container_(container), row_(row)
+        {
+        }
+
+    public:
+        ~RowProxy() = default;
+
+        RowProxy(const RowProxy& other) = default;
+        RowProxy(RowProxy&& other) noexcept = default;
+        RowProxy& operator=(const RowProxy& other) = default;
+        RowProxy& operator=(RowProxy&& other) noexcept = default;
+
+        std::size_t size() const
+        {
+            assert(this->container_ != nullptr);
+
+            return this->container_->size();
+        }
+
+        storage_type& operator[](const std::size_t column)
+        {
+            assert(this->row_ != nullptr);
+            assert(column < size());
+
+            return this->row_[column];
+        }
+
+        const storage_type& operator[](const std::size_t column) const
+        {
+            assert(this->row_ != nullptr);
+            assert(column < size());
+
+            return this->row_[column];
+        }
+    };
+
+    RowProxy operator[](const std::size_t row)
+    {
+        assert(this->storage_ != nullptr);
+        assert(row < size());
+
+        return {this, this->storage_[row]};
+    }
+
+    RowProxy operator[](const std::size_t row) const
+    {
+        assert(this->storage_ != nullptr);
+        assert(row < size());
+
+        return { this, this->storage_[row] };
     }
 
     void swap(Matrix& that) noexcept
@@ -426,7 +486,9 @@ void check_element_modification(Matrix& m)
 
     CHECK_EQ(m.size(), 5);
     CHECK_EQ(m(4, 4), INT64_MAX);
+    CHECK_EQ(m[4][4], INT64_MAX);
 }
+
 void check_manual_fill(Matrix& m)
 {
     CHECK_EQ(m.size(), 5);
@@ -444,9 +506,11 @@ void check_manual_fill(Matrix& m)
 
     for (std::size_t i = 0; i < m.size(); i++)
     {
+        auto row = m[i];
         for (std::size_t j = 0; j < m.size(); j++)
         {
             CHECK_EQ(m(i, j), i + j);
+            CHECK_EQ(row[j], i + j);
         }
     }
 }
@@ -476,9 +540,11 @@ TEST_CASE("matrices can be created with zero fill")
 
     for (std::size_t i = 0; i < m.size(); i++)
     {
+        const auto row = m[i];
         for (std::size_t j = 0; j < m.size(); j++)
         {
             REQUIRE_EQ(m(i, j), 0);
+            REQUIRE_EQ(row[j], 0);
         }
     }
 
@@ -514,23 +580,25 @@ TEST_CASE("matrices can be copied")
 {
     SUBCASE("copy-initialized matrices is identical")
     {
-        Matrix m(5, random_fill);
+        Matrix m1(5, random_fill);
 
-        REQUIRE_EQ(m.size(), 5);
+        REQUIRE_EQ(m1.size(), 5);
 
-        const auto m2 = m;
+        const auto m2 = m1;
 
-        CHECK_EQ(m.size(), m2.size());
+        CHECK_EQ(m1.size(), m2.size());
 
-        for (std::size_t i = 0; i < m.size(); i++)
+        for (std::size_t i = 0; i < m1.size(); i++)
         {
-            for (std::size_t j = 0; j < m.size(); j++)
+            const auto row1 = m1[i];
+            const auto row2 = m2[i];
+            for (std::size_t j = 0; j < m1.size(); j++)
             {
-                CHECK_EQ(m(i, j), m2(i, j));
+                CHECK_EQ(m1(i, j), m2(i, j));
+                CHECK_EQ(row1[j], row2[j]);
             }
         }
     }
-
 }
 
 TEST_CASE("matrices are copy-assigned correctly")
@@ -551,31 +619,38 @@ TEST_CASE("matrices are copy-assigned correctly")
 
     for (std::size_t i = 0; i < n; i++)
     {
+        const auto rowA = a[i];
+        const auto rowB = b[i];
         for (std::size_t j = 0; j < n; j++)
         {
             CHECK_EQ(a(i, j), b(i, j));
+            CHECK_EQ(rowA[j], rowB[j]);
         }
     }
 }
 
 TEST_CASE("matrices can be negated")
 {
-    Matrix m(5, random_fill);
-
-    REQUIRE_EQ(m.size(), 5);
-
     SUBCASE("negated matrices is correct")
     {
-        const auto m2 = -m;
+        Matrix m1(5, random_fill);
 
-        CHECK_EQ(m.size(), m2.size());
+        REQUIRE_EQ(m1.size(), 5);
 
-        for (std::size_t i = 0; i < m.size(); i++)
+        const auto m2 = -m1;
+
+        CHECK_EQ(m1.size(), m2.size());
+
+        for (std::size_t i = 0; i < m1.size(); i++)
         {
-            for (std::size_t j = 0; j < m.size(); j++)
+            const auto row1 = m1[i];
+            const auto row2 = m2[i];
+            for (std::size_t j = 0; j < m1.size(); j++)
             {
-                CHECK_EQ(m(i, j), -m2(i, j));
-                CHECK_EQ(-m(i, j), m2(i, j));
+                CHECK_EQ(m1(i, j), -m2(i, j));
+                CHECK_EQ(-m1(i, j), m2(i, j));
+                CHECK_EQ(row1[j], -row2[j]);
+                CHECK_EQ(-row1[j], row2[j]);
             }
         }
     }
@@ -598,9 +673,13 @@ TEST_CASE("matrices can be added")
 
         for (std::size_t i = 0; i < a.size(); i++)
         {
+            const auto rowA = a[i];
+            const auto rowB = b[i];
+            const auto rowC = c[i];
             for (std::size_t j = 0; j < a.size(); j++)
             {
                 CHECK_EQ(c(i, j), a(i, j) + b(i, j));
+                CHECK_EQ(rowC[j], rowA[j] + rowB[j]);
             }
         }
     }
@@ -613,9 +692,10 @@ TEST_CASE("matrices can be added")
 
         for (std::size_t i = 0; i < a.size(); i++)
         {
+            const auto rowC = c[i];
             for (std::size_t j = 0; j < a.size(); j++)
             {
-                CHECK_EQ(c(i, j), 0);
+                CHECK_EQ(rowC[j], 0);
             }
         }
     }
