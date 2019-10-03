@@ -396,5 +396,8 @@ compile_commands.json
 CTestTestfile.cmake
 _deps
 
+.idea
+cmake-*
+
 /out
 /CMakeSettings.json
