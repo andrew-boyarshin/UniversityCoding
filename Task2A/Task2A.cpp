@@ -245,7 +245,7 @@ class unary_expression : public expression
     std::shared_ptr<expression> inner_;
 
 public:
-    unary_expression(const std::shared_ptr<expression> inner)
+    unary_expression(const std::shared_ptr<expression>& inner)
         : inner_(inner)
     {
         assert(inner);
@@ -272,7 +272,7 @@ class binary_expression : public expression
     std::shared_ptr<expression> right_;
 
 public:
-    binary_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
+    binary_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
         : left_(left),
           right_(right)
     {
@@ -301,7 +301,7 @@ protected:
 
 // A bit of SFINAE again. I hate copy-paste, and prefer to avoid preprocessor macros.
 template <typename T, std::enable_if_t<std::is_base_of<unary_expression, type_decay_t<T>>::value>* = nullptr>
-std::shared_ptr<expression> create(const std::shared_ptr<expression> inner)
+std::shared_ptr<expression> create(const std::shared_ptr<expression>& inner)
 {
     if (!inner)
         return nullptr;
@@ -310,7 +310,7 @@ std::shared_ptr<expression> create(const std::shared_ptr<expression> inner)
 }
 
 template <typename T, std::enable_if_t<std::is_base_of<binary_expression, type_decay_t<T>>::value>* = nullptr>
-std::shared_ptr<expression> create(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
+std::shared_ptr<expression> create(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
 {
     if (!left && !right)
         return nullptr;
@@ -327,7 +327,7 @@ std::shared_ptr<expression> create(const std::shared_ptr<expression> left, const
 class minus_expression final : public unary_expression
 {
 public:
-    minus_expression(const std::shared_ptr<expression> inner)
+    minus_expression(const std::shared_ptr<expression>& inner)
         : unary_expression(inner)
     {
     }
@@ -354,7 +354,7 @@ public:
 class add_expression final : public binary_expression
 {
 public:
-    add_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
+    add_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
         : binary_expression(left, right)
     {
     }
@@ -381,7 +381,7 @@ public:
 class sub_expression final : public binary_expression
 {
 public:
-    sub_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
+    sub_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
         : binary_expression(left, right)
     {
     }
@@ -408,7 +408,7 @@ public:
 class mul_expression final : public binary_expression
 {
 public:
-    mul_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
+    mul_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
         : binary_expression(left, right)
     {
     }
@@ -437,7 +437,7 @@ public:
 class div_expression final : public binary_expression
 {
 public:
-    div_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
+    div_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
         : binary_expression(left, right)
     {
     }
@@ -1051,7 +1051,7 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
     std::shared_ptr<expression> root;
     fin >> root;
 
-    std::shared_ptr<expression> const derivative = root->differentiate(variable_x);
+    auto const derivative = root->differentiate(variable_x);
 
     expression::format_context fmt_context(fout);
     fmt_context.set_implicit_scopes(false);
@@ -1061,7 +1061,7 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
 }
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
-std::string str(std::shared_ptr<const expression> const expression, bool implicit_scopes = false)
+std::string str(std::shared_ptr<const expression> const& expression, bool implicit_scopes = false)
 {
     std::ostringstream buffer;
 
