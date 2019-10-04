@@ -843,7 +843,7 @@ std::shared_ptr<expression> decay(std::shared_ptr<expression> expr)
                 continue;
             }
 
-            const auto rhs = expand(ptr->right());
+            const auto rhs = decay(ptr->right());
             if (rhs != ptr->right())
             {
                 expr = ptr->clone({ ptr->left(), rhs });
@@ -926,7 +926,7 @@ std::shared_ptr<expression> canonicalize(std::shared_ptr<expression> expr)
                 continue;
             }
 
-            const auto rhs = expand(ptr->right());
+            const auto rhs = canonicalize(ptr->right());
             if (rhs != ptr->right())
             {
                 expr = ptr->clone({ ptr->left(), rhs });
@@ -1649,7 +1649,7 @@ TEST_CASE("complete suite")
 
         auto const decayed = decay(derivative);
 
-        CHECK_EQ(str(decayed, true), "2+1*x+x*1");
+        CHECK_EQ(str(decayed, true), "2+x+x");
 
         auto const canonical = canonicalize(decayed);
 
