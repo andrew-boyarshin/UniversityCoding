@@ -77,6 +77,13 @@ class number_expression;
 class zero_expression;
 class variable_expression;
 
+struct format_raise_precedence_t
+{
+    explicit format_raise_precedence_t() = default;
+};
+
+const format_raise_precedence_t format_raise_precedence;
+
 class expression // NOLINT(hicpp-special-member-functions, cppcoreguidelines-special-member-functions)
 {
 protected:
@@ -137,6 +144,12 @@ public:
             return current_scope_;
         }
 
+        format_context& operator<<(const format_raise_precedence_t&)
+        {
+            current_scope()->set_precedence(current_scope()->precedence() - 1);
+            return *this;
+        }
+
         // OK, I was too lazy to write all the variants. Sorry for this SFINAE mess.
         // Could be a bit prettier with C++17 (std::..._v<...> for type_traits).
         // At least std::..._t<...> variants are present.
@@ -151,7 +164,7 @@ public:
         {
             format_context* const context_;
             scope* const parent_;
-            std::int16_t const precedence_;
+            std::int16_t precedence_;
             bool const wrap_in_brackets_;
         public:
             scope(format_context& context, std::int16_t precedence)
@@ -191,6 +204,11 @@ public:
             std::int16_t precedence() const
             {
                 return precedence_;
+            }
+
+            void set_precedence(const std::int16_t precedence)
+            {
+                precedence_ = precedence;
             }
 
             bool wrap_in_brackets() const
@@ -347,7 +365,7 @@ public:
     format_context& format(format_context& context) const override
     {
         format_context::scope scope(context, 3);
-        return context << '-' << inner();
+        return context << '-' << format_raise_precedence << inner();
     }
 };
 
@@ -401,7 +419,7 @@ public:
     format_context& format(format_context& context) const override
     {
         format_context::scope scope(context, 6);
-        return context << left() << '-' << right();
+        return context << left() << '-' << format_raise_precedence << right();
     }
 };
 
@@ -461,7 +479,7 @@ public:
     format_context& format(format_context& context) const override
     {
         format_context::scope scope(context, 5);
-        return context << left() << '/' << right();
+        return context << left() << '/' << format_raise_precedence << right();
     }
 };
 
@@ -1146,6 +1164,8 @@ std::shared_ptr<integral_expression> test_two = create(2);
 std::shared_ptr<integral_expression> test_three = create(3);
 std::shared_ptr<expression> test_one_plus_two = create<add_expression>(test_one, test_two);
 std::shared_ptr<expression> test_three_plus_two = create<add_expression>(test_three, test_two);
+variable_expression variable_y("y");
+variable_expression variable_z("z");
 
 void test_1_plus_2(std::shared_ptr<const expression> const& expression)
 {
@@ -1199,6 +1219,46 @@ TEST_CASE("formatting is working")
     {
         CHECK_THROWS_WITH_AS(parse("3 + 4 * 2 / ( 1 - 5 ) ^ 2 ^ 3"), "Power operator not implemented", std::domain_error);
     }
+    SUBCASE("1-(2-3)")
+    {
+        std::ostringstream buffer;
+
+        auto const expression = parse("1-(2-3)");
+
+        CHECK_EQ(str(expression, true), "1-(2-3)");
+    }
+    SUBCASE("1-(2+3)")
+    {
+        std::ostringstream buffer;
+
+        auto const expression = parse("1-(2+3)");
+
+        CHECK_EQ(str(expression, true), "1-(2+3)");
+    }
+    SUBCASE("1+(2-3)")
+    {
+        std::ostringstream buffer;
+
+        auto const expression = parse("1+(2-3)");
+
+        CHECK_EQ(str(expression, true), "1+2-3");
+    }
+    SUBCASE("1+(2+3)")
+    {
+        std::ostringstream buffer;
+
+        auto const expression = parse("1+(2+3)");
+
+        CHECK_EQ(str(expression, true), "1+2+3");
+    }
+    SUBCASE("-(5+1)")
+    {
+        std::ostringstream buffer;
+
+        auto const expression = parse("-(5+1)");
+
+        CHECK_EQ(str(expression, true), "-(5+1)");
+    }
 }
 
 TEST_CASE("complete suite")
@@ -1214,6 +1274,44 @@ TEST_CASE("complete suite")
 
         CHECK_EQ(str(derivative), "((((0*x)+(2*1))+((1*x)+(x*1)))-0)");
         CHECK_EQ(str(derivative, true), "0*x+2*1+1*x+x*1-0");
+    }
+
+    SUBCASE("analysis 1")
+    {
+        auto const expression = parse("(x*x*x*x+8*x*y*y*y)/(x+2*y)");
+
+        CHECK_EQ(str(expression, true), "(x*x*x*x+8*x*y*y*y)/(x+2*y)");
+
+        auto const derivative_x = expression->differentiate(variable_x);
+
+        CHECK_EQ(str(derivative_x, true), "3*x*x-4*x*y+4*y*y");
+
+        auto const derivative_xx = derivative_x->differentiate(variable_x);
+
+        CHECK_EQ(str(derivative_xx, true), "6*x-4*y");
+
+        auto const derivative_xxy = derivative_x->differentiate(variable_y);
+
+        CHECK_EQ(str(derivative_xxy, true), "-4");
+    }
+
+    SUBCASE("analysis 2")
+    {
+        auto const expression = parse("x*y*y*z*z*z");
+
+        CHECK_EQ(str(expression, true), "x*y*y*z*z*z");
+
+        auto const derivative_z = expression->differentiate(variable_z);
+
+        CHECK_EQ(str(derivative_z, true), "3*x*y*y*z*z");
+
+        auto const derivative_zy = derivative_z->differentiate(variable_y);
+
+        CHECK_EQ(str(derivative_zy, true), "6*x*y*z*z");
+
+        auto const derivative_zyx = derivative_zy->differentiate(variable_x);
+
+        CHECK_EQ(str(derivative_zyx, true), "6*y*z*z");
     }
 }
 
