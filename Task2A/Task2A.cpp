@@ -13,6 +13,7 @@
 #include <vector>
 #include <memory>
 #include <limits>
+#include <initializer_list>
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
 #include <doctest/doctest.h>
@@ -610,7 +611,7 @@ protected:
     bool equal(const expression& other) const override
     {
         const auto* const p_other = dynamic_cast<const integral_expression*>(&other);
-        return value() == p_other->value();
+        return p_other && value() == p_other->value();
     }
 };
 
@@ -740,6 +741,216 @@ std::shared_ptr<expression> expand(std::shared_ptr<expression> expr)
         }
     }
     while (old_value.lock() != expr);
+
+    return expr;
+}
+
+std::shared_ptr<expression> decay(std::shared_ptr<expression> expr)
+{
+    std::weak_ptr<expression> old_value;
+
+    do
+    {
+        old_value = expr;
+
+        if (const auto mul = std::dynamic_pointer_cast<const mul_expression>(expr))
+        {
+            const auto lhs = std::dynamic_pointer_cast<const integral_expression>(mul->left());
+            const auto rhs = std::dynamic_pointer_cast<const integral_expression>(mul->right());
+
+            if (lhs)
+            {
+                const auto left = lhs->value();
+
+                if (left == 0)
+                {
+                    expr = create(0);
+                    continue;
+                }
+
+                if (left == 1)
+                {
+                    expr = mul->right();
+                    continue;
+                }
+            }
+
+            if (rhs)
+            {
+                const auto right = rhs->value();
+
+                if (right == 0)
+                {
+                    expr = create(0);
+                    continue;
+                }
+
+                if (right == 1)
+                {
+                    expr = mul->left();
+                    continue;
+                }
+            }
+
+            if (lhs && rhs)
+            {
+                expr = create(lhs->value() * rhs->value());
+                continue;
+            }
+        }
+
+        if (const auto div = std::dynamic_pointer_cast<const div_expression>(expr))
+        {
+            if (const auto lhs = std::dynamic_pointer_cast<const integral_expression>(div->left()))
+            {
+                const auto numerator = lhs->value();
+                if (const auto rhs = std::dynamic_pointer_cast<const integral_expression>(div->right()))
+                {
+                    const auto denominator = rhs->value();
+                    if (denominator && numerator % denominator == 0)
+                    {
+                        expr = create(numerator / denominator);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if (const auto ptr = std::dynamic_pointer_cast<const integral_expression>(expr))
+        {
+            if (ptr->value() == 0)
+            {
+                return nullptr;
+            }
+        }
+
+        if (const auto ptr = std::dynamic_pointer_cast<const unary_expression>(expr))
+        {
+            const auto replacement = decay(ptr->inner());
+            if (replacement != ptr->inner())
+            {
+                expr = ptr->clone({ replacement });
+                continue;
+            }
+        }
+
+        if (const auto ptr = std::dynamic_pointer_cast<const binary_expression>(expr))
+        {
+            const auto lhs = decay(ptr->left());
+            if (lhs != ptr->left())
+            {
+                expr = ptr->clone({ lhs, ptr->right() });
+                continue;
+            }
+
+            const auto rhs = expand(ptr->right());
+            if (rhs != ptr->right())
+            {
+                expr = ptr->clone({ ptr->left(), rhs });
+                continue;
+            }
+        }
+    }
+    while (old_value.lock() != expr);
+
+    return expr;
+}
+
+std::shared_ptr<expression> canonicalize(std::shared_ptr<expression> expr)
+{
+    std::weak_ptr<expression> old_value;
+
+    do
+    {
+        old_value = expr;
+
+        if (const auto mul = std::dynamic_pointer_cast<const mul_expression>(expr))
+        {
+            if (const auto lhs = std::dynamic_pointer_cast<const integral_expression>(mul->left()))
+            {
+                const auto left = lhs->value();
+
+                if (const auto rhs = std::dynamic_pointer_cast<variable_expression>(mul->right()))
+                {
+                    if (left == 1)
+                    {
+                        expr = rhs;
+                        continue;
+                    }
+
+                    return expr;
+                }
+            }
+
+            if (const auto lhs = std::dynamic_pointer_cast<variable_expression>(mul->left()))
+            {
+                if (const auto rhs = std::dynamic_pointer_cast<integral_expression>(mul->right()))
+                {
+                    expr = create<mul_expression>(rhs, lhs);
+                }
+            }
+        }
+
+        if (const auto div = std::dynamic_pointer_cast<const div_expression>(expr))
+        {
+            if (const auto lhs = std::dynamic_pointer_cast<variable_expression>(div->left()))
+            {
+                if (const auto rhs = std::dynamic_pointer_cast<integral_expression>(div->right()))
+                {
+                    const auto denominator = rhs->value();
+                    if (denominator == 1)
+                    {
+                        expr = lhs;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if (const auto ptr = std::dynamic_pointer_cast<const unary_expression>(expr))
+        {
+            const auto replacement = canonicalize(ptr->inner());
+            if (replacement != ptr->inner())
+            {
+                expr = ptr->clone({ replacement });
+                continue;
+            }
+        }
+
+        if (const auto ptr = std::dynamic_pointer_cast<const binary_expression>(expr))
+        {
+            const auto lhs = canonicalize(ptr->left());
+            if (lhs != ptr->left())
+            {
+                expr = ptr->clone({ lhs, ptr->right() });
+                continue;
+            }
+
+            const auto rhs = expand(ptr->right());
+            if (rhs != ptr->right())
+            {
+                expr = ptr->clone({ ptr->left(), rhs });
+                continue;
+            }
+        }
+    } while (old_value.lock() != expr);
+
+    return expr;
+}
+
+std::shared_ptr<expression> simplify(std::shared_ptr<expression> expr)
+{
+    std::weak_ptr<expression> old_value;
+
+    do
+    {
+        old_value = expr;
+
+        expr = expand(expr);
+        expr = decay(expr);
+        expr = canonicalize(expr);
+
+    } while (old_value.lock() != expr);
 
     return expr;
 }
@@ -1154,7 +1365,7 @@ std::shared_ptr<expression> parse(const std::string& line)
                 break;
             }
             case rpn_postfix_variant::kind_number:
-                stack.emplace(new number_expression(item.value));
+                stack.emplace(create(item.value));
                 break;
             case rpn_postfix_variant::kind_variable:
                 stack.emplace(new variable_expression(item.variable_name));
@@ -1435,6 +1646,18 @@ TEST_CASE("complete suite")
 
         CHECK_EQ(str(derivative), "((((0*x)+(2*1))+((1*x)+(x*1)))-0)");
         CHECK_EQ(str(derivative, true), "0*x+2*1+1*x+x*1-0");
+
+        auto const decayed = decay(derivative);
+
+        CHECK_EQ(str(decayed, true), "2+1*x+x*1");
+
+        auto const canonical = canonicalize(decayed);
+
+        CHECK_EQ(str(canonical, true), "2+x+x");
+
+        auto const simplified = simplify(derivative);
+
+        CHECK_EQ(str(simplified, true), "2+x+x");
     }
 
     SUBCASE("analysis 1")
@@ -1443,15 +1666,15 @@ TEST_CASE("complete suite")
 
         CHECK_EQ(str(expression, true), "(x*x*x*x+8*x*y*y*y)/(x+2*y)");
 
-        auto const derivative_x = expression->differentiate(variable_x);
+        auto const derivative_x = simplify(expression->differentiate(variable_x));
 
         CHECK_EQ(str(derivative_x, true), "3*x*x-4*x*y+4*y*y");
 
-        auto const derivative_xx = derivative_x->differentiate(variable_x);
+        auto const derivative_xx = simplify(derivative_x->differentiate(variable_x));
 
         CHECK_EQ(str(derivative_xx, true), "6*x-4*y");
 
-        auto const derivative_xxy = derivative_x->differentiate(variable_y);
+        auto const derivative_xxy = simplify(derivative_x->differentiate(variable_y));
 
         CHECK_EQ(str(derivative_xxy, true), "-4");
     }
@@ -1462,15 +1685,15 @@ TEST_CASE("complete suite")
 
         CHECK_EQ(str(expression, true), "x*y*y*z*z*z");
 
-        auto const derivative_z = expression->differentiate(variable_z);
+        auto const derivative_z = simplify(expression->differentiate(variable_z));
 
         CHECK_EQ(str(derivative_z, true), "3*x*y*y*z*z");
 
-        auto const derivative_zy = derivative_z->differentiate(variable_y);
+        auto const derivative_zy = simplify(derivative_z->differentiate(variable_y));
 
         CHECK_EQ(str(derivative_zy, true), "6*x*y*z*z");
 
-        auto const derivative_zyx = derivative_zy->differentiate(variable_x);
+        auto const derivative_zyx = simplify(derivative_zy->differentiate(variable_x));
 
         CHECK_EQ(str(derivative_zyx, true), "6*y*z*z");
     }
