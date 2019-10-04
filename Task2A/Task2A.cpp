@@ -66,8 +66,10 @@ using type_decay_t = type_decay_basic_t<type_decay_ptr_t<type_decay_basic_t<std:
 class expression;
 class unary_expression;
 class binary_expression;
+class sum_expression;
 class add_expression;
 class sub_expression;
+class product_expression;
 class mul_expression;
 class div_expression;
 class minus_expression;
@@ -226,6 +228,7 @@ public:
     virtual ~expression() = default;
     virtual std::shared_ptr<expression> differentiate(const variable_expression& variable) const = 0;
     virtual format_context& format(format_context& context) const = 0;
+    virtual std::shared_ptr<expression> clone(std::initializer_list<std::shared_ptr<expression>> args) const = 0;
 
     bool operator==(const expression& other) const
     {
@@ -235,6 +238,12 @@ public:
 
 bool operator==(const std::shared_ptr<const expression>& lhs, const std::shared_ptr<const expression>& rhs)
 {
+    if (!lhs && !rhs)
+        return true;
+
+    if (lhs && !rhs || !lhs && rhs)
+        return false;
+
     return *lhs == *rhs;
 }
 
@@ -367,13 +376,28 @@ public:
         format_context::scope scope(context, 3);
         return context << '-' << format_raise_precedence << inner();
     }
+
+    std::shared_ptr<expression> clone(std::initializer_list<std::shared_ptr<expression>> args) const override
+    {
+        assert(args.size() == 1);
+        return create<minus_expression>(*args.begin());
+    }
 };
 
-class add_expression final : public binary_expression
+class sum_expression : public binary_expression
+{
+public:
+    sum_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
+        : binary_expression(left, right)
+    {
+    }
+};
+
+class add_expression final : public sum_expression
 {
 public:
     add_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
-        : binary_expression(left, right)
+        : sum_expression(left, right)
     {
     }
 
@@ -394,13 +418,20 @@ public:
         format_context::scope scope(context, 6);
         return context << left() << '+' << right();
     }
+
+    std::shared_ptr<expression> clone(std::initializer_list<std::shared_ptr<expression>> args) const override
+    {
+        assert(args.size() == 2);
+        const auto it = args.begin();
+        return create<add_expression>(*it, *(it + 1));
+    }
 };
 
-class sub_expression final : public binary_expression
+class sub_expression final : public sum_expression
 {
 public:
     sub_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
-        : binary_expression(left, right)
+        : sum_expression(left, right)
     {
     }
 
@@ -421,13 +452,29 @@ public:
         format_context::scope scope(context, 6);
         return context << left() << '-' << format_raise_precedence << right();
     }
+
+    std::shared_ptr<expression> clone(std::initializer_list<std::shared_ptr<expression>> args) const override
+    {
+        assert(args.size() == 2);
+        const auto it = args.begin();
+        return create<sub_expression>(*it, *(it + 1));
+    }
 };
 
-class mul_expression final : public binary_expression
+class product_expression : public binary_expression
+{
+public:
+    product_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
+        : binary_expression(left, right)
+    {
+    }
+};
+
+class mul_expression final : public product_expression
 {
 public:
     mul_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
-        : binary_expression(left, right)
+        : product_expression(left, right)
     {
     }
 
@@ -450,13 +497,20 @@ public:
         format_context::scope scope(context, 5);
         return context << left() << '*' << right();
     }
+
+    std::shared_ptr<expression> clone(std::initializer_list<std::shared_ptr<expression>> args) const override
+    {
+        assert(args.size() == 2);
+        const auto it = args.begin();
+        return create<mul_expression>(*it, *(it + 1));
+    }
 };
 
-class div_expression final : public binary_expression
+class div_expression final : public product_expression
 {
 public:
     div_expression(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
-        : binary_expression(left, right)
+        : product_expression(left, right)
     {
     }
 
@@ -480,6 +534,13 @@ public:
     {
         format_context::scope scope(context, 5);
         return context << left() << '/' << format_raise_precedence << right();
+    }
+
+    std::shared_ptr<expression> clone(std::initializer_list<std::shared_ptr<expression>> args) const override
+    {
+        assert(args.size() == 2);
+        const auto it = args.begin();
+        return create<div_expression>(*it, *(it + 1));
     }
 };
 
@@ -515,6 +576,12 @@ public:
         return context << name();
     }
 
+    std::shared_ptr<expression> clone(std::initializer_list<std::shared_ptr<expression>> args) const override
+    {
+        assert(args.size() == 0);
+        return std::make_shared<variable_expression>(name());
+    }
+
 protected:
     bool equal(const expression& other) const override
     {
@@ -536,6 +603,8 @@ public:
     {
         return context << value();
     }
+
+    std::shared_ptr<expression> clone(std::initializer_list<std::shared_ptr<expression>> args) const override;
 
 protected:
     bool equal(const expression& other) const override
@@ -605,6 +674,74 @@ std::shared_ptr<expression> variable_expression::differentiate(const variable_ex
 std::shared_ptr<expression> integral_expression::differentiate(const variable_expression&) const
 {
     return create(0);
+}
+
+std::shared_ptr<expression> integral_expression::clone(std::initializer_list<std::shared_ptr<expression>> args) const
+{
+    assert(args.size() == 0);
+    return create(value());
+}
+
+std::shared_ptr<expression> expand(std::shared_ptr<expression> expr)
+{
+    std::weak_ptr<expression> old_value;
+
+    do
+    {
+        old_value = expr;
+
+        if (const auto ptr = std::dynamic_pointer_cast<const product_expression>(expr))
+        {
+            const auto mul = std::dynamic_pointer_cast<const mul_expression>(ptr);
+            const auto div = std::dynamic_pointer_cast<const div_expression>(ptr);
+            assert(mul || div);
+
+            if (const auto lhs = std::dynamic_pointer_cast<const sum_expression>(ptr->left()))
+            {
+                expr = lhs->clone({ ptr->clone({ lhs->left(), ptr->right() }), ptr->clone({ lhs->right(), ptr->right() }) });
+                continue;
+            }
+
+            if (mul && !div)
+            {
+                if (const auto rhs = std::dynamic_pointer_cast<const sum_expression>(ptr->right()))
+                {
+                    expr = rhs->clone({ ptr->clone({ ptr->left(), rhs->left() }), ptr->clone({ ptr->left(), rhs->right() }) });
+                    continue;
+                }
+            }
+        }
+
+        if (const auto ptr = std::dynamic_pointer_cast<const unary_expression>(expr))
+        {
+            const auto replacement = expand(ptr->inner());
+            if (replacement != ptr->inner())
+            {
+                expr = ptr->clone({ replacement });
+                continue;
+            }
+        }
+
+        if (const auto ptr = std::dynamic_pointer_cast<const binary_expression>(expr))
+        {
+            const auto lhs = expand(ptr->left());
+            if (lhs != ptr->left())
+            {
+                expr = ptr->clone({ lhs, ptr->right() });
+                continue;
+            }
+
+            const auto rhs = expand(ptr->right());
+            if (rhs != ptr->right())
+            {
+                expr = ptr->clone({ ptr->left(), rhs });
+                continue;
+            }
+        }
+    }
+    while (old_value.lock() != expr);
+
+    return expr;
 }
 
 /// Microsoft STL std::from_chars (C++17) implementation (C++14 backport)
@@ -1258,6 +1395,30 @@ TEST_CASE("formatting is working")
         auto const expression = parse("-(5+1)");
 
         CHECK_EQ(str(expression, true), "-(5+1)");
+    }
+}
+
+TEST_CASE("expression expansion")
+{
+    SUBCASE("(x+y)*(1-2)")
+    {
+        auto const expression = parse("(x+y)*(1-2)");
+
+        CHECK_EQ(str(expression, true), "(x+y)*(1-2)");
+
+        auto const expansion = expand(expression);
+
+        CHECK_EQ(str(expansion, true), "x*1-x*2+y*1-y*2");
+    }
+    SUBCASE("(x-y)/(1-2)")
+    {
+        auto const expression = parse("(x-y)/(1-2)");
+
+        CHECK_EQ(str(expression, true), "(x-y)/(1-2)");
+
+        auto const expansion = expand(expression);
+
+        CHECK_EQ(str(expansion, true), "x/(1-2)-y/(1-2)");
     }
 }
 
