@@ -11,6 +11,8 @@
 #include <typeindex>
 #include <cctype>
 #include <vector>
+#include <memory>
+#include <limits>
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
 #include <doctest/doctest.h>
@@ -41,15 +43,25 @@ constexpr u_storage_type u_storage_type_min = std::numeric_limits<u_storage_type
 constexpr u_storage_type u_storage_type_max = std::numeric_limits<u_storage_type>::max();
 
 template<typename T>
-struct type_decay {
-private:
-    typedef std::remove_cv_t<std::remove_reference_t<T>> U;
-public:
-    typedef std::remove_cv_t<std::remove_pointer_t<std::conditional_t<std::is_array<U>::value, std::remove_extent_t<U>, U>>> type;
+using type_decay_basic_t = std::remove_cv_t<std::remove_pointer_t<std::remove_cv_t<std::remove_reference_t<std::remove_cv_t<T>>>>>;
+
+template <typename T>
+struct type_decay_ptr
+{
+    using type = T;
+};
+
+template <typename T>
+struct type_decay_ptr<std::shared_ptr<T>>
+{
+    using type = T;
 };
 
 template<typename T>
-using type_decay_t = typename type_decay<T>::type;
+using type_decay_ptr_t = typename type_decay_ptr<T>::type;
+
+template<typename T>
+using type_decay_t = type_decay_basic_t<type_decay_ptr_t<type_decay_basic_t<T>>>;
 
 class expression;
 class unary_expression;
@@ -60,6 +72,7 @@ class mul_expression;
 class div_expression;
 class minus_expression;
 class atom_expression;
+class integral_expression;
 class number_expression;
 class zero_expression;
 class variable_expression;
@@ -94,7 +107,12 @@ public:
             return obj.format(*this);
         }
 
-        format_context& operator<<(const expression* const obj)
+        format_context& operator<<(const std::shared_ptr<expression>& obj)
+        {
+            return obj->format(*this);
+        }
+
+        format_context& operator<<(const std::shared_ptr<const expression>& obj)
         {
             return obj->format(*this);
         }
@@ -187,7 +205,7 @@ public:
     };
 
     virtual ~expression() = default;
-    virtual expression* differentiate(const variable_expression& variable) const = 0;
+    virtual std::shared_ptr<expression> differentiate(const variable_expression& variable) const = 0;
     virtual format_context& format(format_context& context) const = 0;
 
     bool operator==(const expression& other) const
@@ -196,6 +214,26 @@ public:
     }
 };
 
+bool operator==(const std::shared_ptr<const expression>& lhs, const std::shared_ptr<const expression>& rhs)
+{
+    return *lhs == *rhs;
+}
+
+bool operator!=(const std::shared_ptr<const expression>& lhs, const std::shared_ptr<const expression>& rhs)
+{
+    return !(lhs == rhs);
+}
+
+bool operator==(const std::shared_ptr<expression>& lhs, const std::shared_ptr<expression>& rhs)
+{
+    return std::const_pointer_cast<const expression>(lhs) == std::const_pointer_cast<const expression>(rhs);
+}
+
+bool operator!=(const std::shared_ptr<expression>& lhs, const std::shared_ptr<expression>& rhs)
+{
+    return !(lhs == rhs);
+}
+
 bool operator!=(const expression& lhs, const expression& rhs)
 {
     return !(lhs == rhs);
@@ -203,16 +241,16 @@ bool operator!=(const expression& lhs, const expression& rhs)
 
 class unary_expression : public expression
 {
-    expression* inner_;
+    std::shared_ptr<expression> inner_;
 
 public:
-    unary_expression(expression* const inner)
+    unary_expression(const std::shared_ptr<expression> inner)
         : inner_(inner)
     {
         assert(inner);
     }
 
-    expression* inner() const
+    std::shared_ptr<expression> inner() const
     {
         return inner_;
     }
@@ -223,29 +261,29 @@ protected:
         if (!equal_types(other)) return false;
 
         const auto* const p_other = dynamic_cast<const unary_expression*>(&other);
-        return *inner() == *p_other->inner();
+        return inner() == p_other->inner();
     }
 };
 
 class binary_expression : public expression
 {
-    expression* left_;
-    expression* right_;
+    std::shared_ptr<expression> left_;
+    std::shared_ptr<expression> right_;
 
 public:
-    binary_expression(expression* const left, expression* const right)
+    binary_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
         : left_(left),
           right_(right)
     {
         assert(left && right);
     }
 
-    expression* left() const
+    std::shared_ptr<expression> left() const
     {
         return left_;
     }
 
-    expression* right() const
+    std::shared_ptr<expression> right() const
     {
         return right_;
     }
@@ -256,39 +294,39 @@ protected:
         if (!equal_types(other)) return false;
 
         const auto* const p_other = dynamic_cast<const binary_expression*>(&other);
-        return *left() == *p_other->left() && *right() == *p_other->right();
+        return left() == p_other->left() && right() == p_other->right();
     }
 };
 
 // A bit of SFINAE again. I hate copy-paste, and prefer to avoid preprocessor macros.
-template<typename T, std::enable_if_t<std::is_base_of<unary_expression, std::remove_cv_t<T>>::value>* = nullptr>
-expression* create(expression* const inner)
+template<typename T, std::enable_if_t<std::is_base_of<unary_expression, type_decay_t<T>>::value>* = nullptr>
+std::shared_ptr<expression> create(const std::shared_ptr<expression> inner)
 {
-    if (inner == nullptr)
+    if (!inner)
         return nullptr;
 
-    return new T(inner);
+    return std::make_shared<T>(inner);
 }
 
-template<typename T, std::enable_if_t<std::is_base_of<binary_expression, std::remove_cv_t<T>>::value>* = nullptr>
-expression* create(expression* const left, expression* const right)
+template<typename T, std::enable_if_t<std::is_base_of<binary_expression, type_decay_t<T>>::value>* = nullptr>
+std::shared_ptr<expression> create(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
 {
-    if (left == nullptr && right == nullptr)
+    if (!left && !right)
         return nullptr;
 
-    if (left != nullptr && right == nullptr)
+    if (left && !right)
         return left;
 
-    if (left == nullptr && right != nullptr)
+    if (!left && right)
         return right;
 
-    return new T(left, right);
+    return std::make_shared<T>(left, right);
 }
 
 class minus_expression final : public unary_expression
 {
 public:
-    minus_expression(expression* const inner)
+    minus_expression(const std::shared_ptr<expression> inner)
         : unary_expression(inner)
     {
     }
@@ -300,7 +338,7 @@ public:
     minus_expression& operator=(const minus_expression& other) = default;
     minus_expression& operator=(minus_expression&& other) noexcept = default;
 
-    expression* differentiate(const variable_expression& variable) const override
+    std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
         return create<minus_expression>(inner()->differentiate(variable));
     }
@@ -315,7 +353,7 @@ public:
 class add_expression final : public binary_expression
 {
 public:
-    add_expression(expression* const left, expression* const right)
+    add_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
         : binary_expression(left, right)
     {
     }
@@ -327,7 +365,7 @@ public:
     add_expression& operator=(const add_expression& other) = default;
     add_expression& operator=(add_expression&& other) noexcept = default;
 
-    expression* differentiate(const variable_expression& variable) const override
+    std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
         return create<add_expression>(left()->differentiate(variable), right()->differentiate(variable));
     }
@@ -342,7 +380,7 @@ public:
 class sub_expression final : public binary_expression
 {
 public:
-    sub_expression(expression* const left, expression* const right)
+    sub_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
         : binary_expression(left, right)
     {
     }
@@ -354,7 +392,7 @@ public:
     sub_expression& operator=(const sub_expression& other) = default;
     sub_expression& operator=(sub_expression&& other) noexcept = default;
 
-    expression* differentiate(const variable_expression& variable) const override
+    std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
         return create<sub_expression>(left()->differentiate(variable), right()->differentiate(variable));
     }
@@ -369,7 +407,7 @@ public:
 class mul_expression final : public binary_expression
 {
 public:
-    mul_expression(expression* const left, expression* const right)
+    mul_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
         : binary_expression(left, right)
     {
     }
@@ -381,10 +419,10 @@ public:
     mul_expression& operator=(const mul_expression& other) = default;
     mul_expression& operator=(mul_expression&& other) noexcept = default;
 
-    expression* differentiate(const variable_expression& variable) const override
+    std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
-        auto* const lhs = create<mul_expression>(left()->differentiate(variable), right());
-        auto* const rhs = create<mul_expression>(left(), right()->differentiate(variable));
+        auto const lhs = create<mul_expression>(left()->differentiate(variable), right());
+        auto const rhs = create<mul_expression>(left(), right()->differentiate(variable));
         return create<add_expression>(lhs, rhs);
     }
 
@@ -398,7 +436,7 @@ public:
 class div_expression final : public binary_expression
 {
 public:
-    div_expression(expression* const left, expression* const right)
+    div_expression(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
         : binary_expression(left, right)
     {
     }
@@ -410,12 +448,12 @@ public:
     div_expression& operator=(const div_expression& other) = default;
     div_expression& operator=(div_expression&& other) noexcept = default;
 
-    expression* differentiate(const variable_expression& variable) const override
+    std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
-        auto* const lhs = create<mul_expression>(left()->differentiate(variable), right());
-        auto* const rhs = create<mul_expression>(left(), right()->differentiate(variable));
-        auto* const num = create<sub_expression>(lhs, rhs);
-        auto* const den = create<mul_expression>(right(), right());
+        auto const lhs = create<mul_expression>(left()->differentiate(variable), right());
+        auto const rhs = create<mul_expression>(left(), right()->differentiate(variable));
+        auto const num = create<sub_expression>(lhs, rhs);
+        auto const den = create<mul_expression>(right(), right());
         return create<div_expression>(num, den);
     }
 
@@ -451,7 +489,7 @@ public:
         return name_;
     }
 
-    expression* differentiate(const variable_expression& variable) const override;
+    std::shared_ptr<expression> differentiate(const variable_expression& variable) const override;
     format_context& format(format_context& context) const override
     {
         return context << name();
@@ -472,7 +510,7 @@ class integral_expression : public atom_expression
 public:
     virtual storage_type value() const = 0;
 
-    expression* differentiate(const variable_expression&) const override;
+    std::shared_ptr<expression> differentiate(const variable_expression&) const override;
 
     format_context& format(format_context& context) const override
     {
@@ -528,17 +566,25 @@ public:
     }
 };
 
-expression* variable_expression::differentiate(const variable_expression& variable) const
+std::shared_ptr<integral_expression> create(const storage_type value)
 {
-    if (this->name() == variable.name())
-        return new number_expression(1);
+    if (!value)
+        return std::make_shared<zero_expression>();
 
-    return new variable_expression(*this);
+    return std::make_shared<number_expression>(value);
 }
 
-expression* integral_expression::differentiate(const variable_expression&) const
+std::shared_ptr<expression> variable_expression::differentiate(const variable_expression& variable) const
 {
-    return new zero_expression();
+    if (this->name() == variable.name())
+        return create(1);
+
+    return create(0);
+}
+
+std::shared_ptr<expression> integral_expression::differentiate(const variable_expression&) const
+{
+    return create(0);
 }
 
 /// Microsoft STL std::from_chars (C++17) implementation (C++14 backport)
@@ -665,7 +711,7 @@ struct rpn_stack_variant final
 
     union
     {
-        operator_kind operator_kind = {};
+        ::operator_kind operator_kind = {};
     };
 
     explicit rpn_stack_variant(const ::operator_kind operator_kind)
@@ -692,7 +738,7 @@ struct rpn_postfix_variant final
 
     // Union is more reasonable here, but causes default destructor, copy/move constructors/operator= to be deleted
     // due to class.copy.assign#7.1
-    operator_kind operator_kind = {};
+    ::operator_kind operator_kind = {};
     storage_type value = storage_type{};
     std::string variable_name;
 
@@ -873,7 +919,7 @@ void parse_shunting_yard(const std::string& line, std::vector<rpn_postfix_varian
     }
 }
 
-void parse_extract_args(const std::size_t count, std::stack<expression*>& stack, std::deque<expression*>& arguments)
+void parse_extract_args(const std::size_t count, std::stack<std::shared_ptr<expression>>& stack, std::deque<std::shared_ptr<expression>>& arguments)
 {
     for (std::size_t i = 0; i < count; ++i)
     {
@@ -882,12 +928,12 @@ void parse_extract_args(const std::size_t count, std::stack<expression*>& stack,
     }
 }
 
-expression* parse(const std::string& line)
+std::shared_ptr<expression> parse(const std::string& line)
 {
     std::vector<rpn_postfix_variant> output;
     parse_shunting_yard(line, output);
 
-    std::stack<expression*> stack;
+    std::stack<std::shared_ptr<expression>> stack;
 
     for (const auto& item : output)
     {
@@ -895,7 +941,7 @@ expression* parse(const std::string& line)
         {
             case rpn_postfix_variant::kind_operator:
             {
-                std::deque<expression*> arguments;
+                std::deque<std::shared_ptr<expression>> arguments;
                 switch (item.operator_kind)
                 {
                 case operator_kind::unknown:
@@ -955,11 +1001,11 @@ expression* parse(const std::string& line)
     return stack.top();
 }
 
-std::istream& operator>>(std::istream& in, expression*& expression)
+std::istream& operator>>(std::istream& in, std::shared_ptr<expression>& expression)
 {
     std::string line;
     std::getline(in, line);
-    expression = new variable_expression(line);
+    expression = parse(line);
     return in;
 }
 
@@ -987,10 +1033,10 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
 
     std::ofstream fout("output.txt");
 
-    expression* root;
+    std::shared_ptr<expression> root;
     fin >> root;
 
-    expression* const derivative = root->differentiate(variable_x);
+    std::shared_ptr<expression> const derivative = root->differentiate(variable_x);
 
     expression::format_context fmt_context(fout);
     fmt_context.set_implicit_scopes(false);
@@ -1000,7 +1046,7 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
 }
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
-std::string str(const expression* const expression, bool implicit_scopes = false)
+std::string str(std::shared_ptr<const expression> const expression, bool implicit_scopes = false)
 {
     std::ostringstream buffer;
 
@@ -1016,7 +1062,7 @@ TEST_CASE("numbers are printed correctly")
     std::int64_t n = 0;
     DOCTEST_INDEX_PARAMETERIZED_DATA(n, -50, 50);
 
-    CHECK_EQ(str(new number_expression(n)), std::to_string(n));
+    CHECK_EQ(str(create(n)), std::to_string(n));
 }
 
 TEST_CASE("numbers are parsed correctly")
@@ -1080,27 +1126,17 @@ TEST_CASE("numbers are parsed correctly")
     }
 }
 
-number_expression test_one(1);
-number_expression test_two(2);
-number_expression test_three(3);
-add_expression test_one_plus_two(&test_one, &test_two);
-add_expression test_three_plus_two(&test_three, &test_two);
+std::shared_ptr<integral_expression> test_one = create(1);
+std::shared_ptr<integral_expression> test_two = create(2);
+std::shared_ptr<integral_expression> test_three = create(3);
+std::shared_ptr<expression> test_one_plus_two = create<add_expression>(test_one, test_two);
+std::shared_ptr<expression> test_three_plus_two = create<add_expression>(test_three, test_two);
 
-void test_1_plus_2(expression* const expression)
+void test_1_plus_2(std::shared_ptr<const expression> const& expression)
 {
     // Check using equality operator
-    CHECK_EQ(test_one_plus_two, *expression);
-    CHECK_NE(test_three_plus_two, *expression);
-
-    // Check manually
-    auto* add_expression_ptr = dynamic_cast<add_expression*>(expression);
-    CHECK_NE(nullptr, add_expression_ptr);
-    auto* left_expression = dynamic_cast<number_expression*>(add_expression_ptr->left());
-    auto* right_expression = dynamic_cast<number_expression*>(add_expression_ptr->right());
-    CHECK_NE(nullptr, left_expression);
-    CHECK_NE(nullptr, right_expression);
-    CHECK_EQ(left_expression->value(), 1);
-    CHECK_EQ(right_expression->value(), 2);
+    CHECK(*test_one_plus_two == *expression);
+    CHECK(*test_three_plus_two != *expression);
 }
 
 TEST_CASE("parser is working")
@@ -1123,7 +1159,7 @@ TEST_CASE("formatting is working")
 {
     SUBCASE("1 + 2")
     {
-        auto* const expression = parse("1 + 2");
+        auto const expression = parse("1 + 2");
 
         CHECK_EQ(str(expression), "(1+2)");
         CHECK_EQ(str(expression, true), "1+2");
@@ -1132,14 +1168,14 @@ TEST_CASE("formatting is working")
     {
         std::ostringstream buffer;
 
-        auto* const expression = parse("((1+2)-2)");
+        auto const expression = parse("((1+2)-2)");
 
         CHECK_EQ(str(expression), "((1+2)-2)");
         CHECK_EQ(str(expression, true), "1+2-2");
     }
     SUBCASE("2*x")
     {
-        auto* const expression = parse("2*x");
+        auto const expression = parse("2*x");
 
         CHECK_EQ(str(expression), "(2*x)");
         CHECK_EQ(str(expression, true), "2*x");
@@ -1154,12 +1190,12 @@ TEST_CASE("complete suite")
 {
     SUBCASE("sample")
     {
-        auto* const expression = parse("(((2*x)+(x*x))-3)");
+        auto const expression = parse("(((2*x)+(x*x))-3)");
 
         CHECK_EQ(str(expression), "(((2*x)+(x*x))-3)");
         CHECK_EQ(str(expression, true), "2*x+x*x-3");
 
-        auto* const derivative = expression->differentiate(variable_x);
+        auto const derivative = expression->differentiate(variable_x);
 
         CHECK_EQ(str(derivative), "((((0*x)+(2*1))+((1*x)+(x*1)))-0)");
         CHECK_EQ(str(derivative, true), "0*x+2*1+1*x+x*1-0");
