@@ -42,8 +42,8 @@ constexpr storage_type storage_type_max = std::numeric_limits<storage_type>::max
 constexpr u_storage_type u_storage_type_min = std::numeric_limits<u_storage_type>::min();
 constexpr u_storage_type u_storage_type_max = std::numeric_limits<u_storage_type>::max();
 
-template<typename T>
-using type_decay_basic_t = std::remove_cv_t<std::remove_pointer_t<std::remove_cv_t<std::remove_reference_t<std::remove_cv_t<T>>>>>;
+template <typename T>
+using type_decay_basic_t = std::remove_cv_t<std::remove_pointer_t<std::remove_cv_t<std::remove_reference_t<T>>>>;
 
 template <typename T>
 struct type_decay_ptr
@@ -57,11 +57,11 @@ struct type_decay_ptr<std::shared_ptr<T>>
     using type = T;
 };
 
-template<typename T>
+template <typename T>
 using type_decay_ptr_t = typename type_decay_ptr<T>::type;
 
-template<typename T>
-using type_decay_t = type_decay_basic_t<type_decay_ptr_t<type_decay_basic_t<T>>>;
+template <typename T>
+using type_decay_t = type_decay_basic_t<type_decay_ptr_t<type_decay_basic_t<std::remove_cv_t<T>>>>;
 
 class expression;
 class unary_expression;
@@ -140,7 +140,7 @@ public:
         // OK, I was too lazy to write all the variants. Sorry for this SFINAE mess.
         // Could be a bit prettier with C++17 (std::..._v<...> for type_traits).
         // At least std::..._t<...> variants are present.
-        template<typename T, std::enable_if_t<!std::is_base_of<expression, type_decay_t<T>>::value>* = nullptr>
+        template <typename T, std::enable_if_t<!std::is_base_of<expression, type_decay_t<T>>::value>* = nullptr>
         format_context& operator<<(const T& obj)
         {
             *stream_ << obj;
@@ -155,7 +155,8 @@ public:
             bool const wrap_in_brackets_;
         public:
             scope(format_context& context, std::int16_t precedence)
-                : context_(&context), parent_(context.current_scope()), precedence_(precedence), wrap_in_brackets_(!context.implicit_scopes() || (parent_ ? parent_->precedence_ < precedence : false))
+                : context_(&context), parent_(context.current_scope()), precedence_(precedence),
+                  wrap_in_brackets_(!context.implicit_scopes() || (parent_ ? parent_->precedence_ < precedence : false))
             {
                 context.current_scope_ = this;
 
@@ -299,7 +300,7 @@ protected:
 };
 
 // A bit of SFINAE again. I hate copy-paste, and prefer to avoid preprocessor macros.
-template<typename T, std::enable_if_t<std::is_base_of<unary_expression, type_decay_t<T>>::value>* = nullptr>
+template <typename T, std::enable_if_t<std::is_base_of<unary_expression, type_decay_t<T>>::value>* = nullptr>
 std::shared_ptr<expression> create(const std::shared_ptr<expression> inner)
 {
     if (!inner)
@@ -308,7 +309,7 @@ std::shared_ptr<expression> create(const std::shared_ptr<expression> inner)
     return std::make_shared<T>(inner);
 }
 
-template<typename T, std::enable_if_t<std::is_base_of<binary_expression, type_decay_t<T>>::value>* = nullptr>
+template <typename T, std::enable_if_t<std::is_base_of<binary_expression, type_decay_t<T>>::value>* = nullptr>
 std::shared_ptr<expression> create(const std::shared_ptr<expression> left, const std::shared_ptr<expression> right)
 {
     if (!left && !right)
@@ -490,6 +491,7 @@ public:
     }
 
     std::shared_ptr<expression> differentiate(const variable_expression& variable) const override;
+
     format_context& format(format_context& context) const override
     {
         return context << name();
@@ -770,16 +772,24 @@ bool parse_is_variable_char(const char c)
     return std::isalnum(c) || c == '_';
 }
 
-bool parse_is_right_associative(const operator_kind kind)
+bool parse_is_left_associative(const operator_kind kind)
 {
     switch (kind)
     {
-    case operator_kind::pow:
-    case operator_kind::minus:
-        return true;
-    default:
-        return false;
+        case operator_kind::pow:
+        case operator_kind::minus:
+            return false;
+        default:
+            return true;
     }
+}
+
+bool parse_check_precedence(const operator_kind& new_operator_kind, const operator_kind& top_operator_kind)
+{
+    if (top_operator_kind > new_operator_kind)
+        return true;
+
+    return top_operator_kind == new_operator_kind && parse_is_left_associative(top_operator_kind);
 }
 
 enum class parse_last_state
@@ -832,32 +842,35 @@ void parse_shunting_yard(const std::string& line, std::vector<rpn_postfix_varian
         // ReSharper disable once CppDefaultCaseNotHandledInSwitchStatement
         switch (first[0])
         {
-        case '+':
-            operator_kind = operator_kind::add;
-            break;
-        case '-':
-            operator_kind = last_state == parse_last_state::value ? operator_kind::sub : operator_kind::minus;
-            break;
-        case '*':
-            operator_kind = operator_kind::mul;
-            break;
-        case '/':
-            operator_kind = operator_kind::div;
-            break;
-        case '^':
-            operator_kind = operator_kind::pow;
-            break;
+            case '+':
+                operator_kind = operator_kind::add;
+                break;
+            case '-':
+                operator_kind = last_state == parse_last_state::value ? operator_kind::sub : operator_kind::minus;
+                break;
+            case '*':
+                operator_kind = operator_kind::mul;
+                break;
+            case '/':
+                operator_kind = operator_kind::div;
+                break;
+            case '^':
+                operator_kind = operator_kind::pow;
+                break;
         }
 
         if (operator_kind != operator_kind::unknown)
         {
             while (!stack.empty() && stack.top().kind == rpn_stack_variant::stack_operator)
             {
-                if (operator_kind >= stack.top().operator_kind && (parse_is_right_associative(operator_kind) || operator_kind > stack.top().operator_kind)) {
+                const auto& top = stack.top();
+
+                if (!parse_check_precedence(operator_kind, top.operator_kind))
+                {
                     break;
                 }
 
-                output.emplace_back(stack.top().operator_kind);
+                output.emplace_back(top.operator_kind);
                 stack.pop();
             }
 
@@ -871,29 +884,29 @@ void parse_shunting_yard(const std::string& line, std::vector<rpn_postfix_varian
         // ReSharper disable once CppDefaultCaseNotHandledInSwitchStatement
         switch (first[0])
         {
-        case '(':
-            stack.emplace(rpn_stack_variant_bracket_open);
-            last_state = parse_last_state::stack;
-            ++first;
-            continue;
+            case '(':
+                stack.emplace(rpn_stack_variant_bracket_open);
+                last_state = parse_last_state::stack;
+                ++first;
+                continue;
 
-        case ')':
+            case ')':
 
-            while (!stack.empty() && stack.top().kind != rpn_stack_variant::stack_open)
-            {
-                output.emplace_back(stack.top().operator_kind);
+                while (!stack.empty() && stack.top().kind != rpn_stack_variant::stack_open)
+                {
+                    output.emplace_back(stack.top().operator_kind);
+                    stack.pop();
+                }
+
+                if (stack.empty() || stack.top().kind != rpn_stack_variant::stack_open)
+                {
+                    throw std::length_error("Invalid parentheses sequence: no opening bracket for a closing one");
+                }
+
                 stack.pop();
-            }
-
-            if (stack.empty() || stack.top().kind != rpn_stack_variant::stack_open)
-            {
-                throw std::length_error("Invalid parentheses sequence: no opening bracket for a closing one");
-            }
-
-            stack.pop();
-            last_state = parse_last_state::value;
-            ++first;
-            continue;
+                last_state = parse_last_state::value;
+                ++first;
+                continue;
         }
 
         if (!parse_is_variable_char(*first))
@@ -919,7 +932,8 @@ void parse_shunting_yard(const std::string& line, std::vector<rpn_postfix_varian
     }
 }
 
-void parse_extract_args(const std::size_t count, std::stack<std::shared_ptr<expression>>& stack, std::deque<std::shared_ptr<expression>>& arguments)
+void parse_extract_args(const std::size_t count, std::stack<std::shared_ptr<expression>>& stack,
+                        std::deque<std::shared_ptr<expression>>& arguments)
 {
     for (std::size_t i = 0; i < count; ++i)
     {
@@ -944,43 +958,43 @@ std::shared_ptr<expression> parse(const std::string& line)
                 std::deque<std::shared_ptr<expression>> arguments;
                 switch (item.operator_kind)
                 {
-                case operator_kind::unknown:
-                    throw std::domain_error("A token has been added to RPN as an unknown operator");
-                case operator_kind::add:
-                case operator_kind::sub:
-                case operator_kind::mul:
-                case operator_kind::div:
-                case operator_kind::pow:
-                    parse_extract_args(2, stack, arguments);
-                    break;
-                case operator_kind::minus:
-                    parse_extract_args(1, stack, arguments);
-                    break;
-                default:
-                    throw std::domain_error("Operator has been parsed to RPN, but not recognized at expression tree build time");
+                    case operator_kind::unknown:
+                        throw std::domain_error("A token has been added to RPN as an unknown operator");
+                    case operator_kind::add:
+                    case operator_kind::sub:
+                    case operator_kind::mul:
+                    case operator_kind::div:
+                    case operator_kind::pow:
+                        parse_extract_args(2, stack, arguments);
+                        break;
+                    case operator_kind::minus:
+                        parse_extract_args(1, stack, arguments);
+                        break;
+                    default:
+                        throw std::domain_error("Operator has been parsed to RPN, but not recognized at expression tree build time");
                 }
 
                 switch (item.operator_kind)
                 {
-                case operator_kind::add:
-                    stack.emplace(create<add_expression>(arguments.front(), arguments.back()));
-                    break;
-                case operator_kind::sub:
-                    stack.emplace(create<sub_expression>(arguments.front(), arguments.back()));
-                    break;
-                case operator_kind::mul:
-                    stack.emplace(create<mul_expression>(arguments.front(), arguments.back()));
-                    break;
-                case operator_kind::div:
-                    stack.emplace(create<div_expression>(arguments.front(), arguments.back()));
-                    break;
-                case operator_kind::pow:
-                    throw std::domain_error("Power operator not implemented");
-                case operator_kind::minus:
-                    stack.emplace(create<minus_expression>(arguments.front()));
-                    break;
-                default:
-                    throw std::domain_error("Operator has recognized its arguments, but there is no known way to create corresponding expression");
+                    case operator_kind::add:
+                        stack.emplace(create<add_expression>(arguments.front(), arguments.back()));
+                        break;
+                    case operator_kind::sub:
+                        stack.emplace(create<sub_expression>(arguments.front(), arguments.back()));
+                        break;
+                    case operator_kind::mul:
+                        stack.emplace(create<mul_expression>(arguments.front(), arguments.back()));
+                        break;
+                    case operator_kind::div:
+                        stack.emplace(create<div_expression>(arguments.front(), arguments.back()));
+                        break;
+                    case operator_kind::pow:
+                        throw std::domain_error("Power operator not implemented");
+                    case operator_kind::minus:
+                        stack.emplace(create<minus_expression>(arguments.front()));
+                        break;
+                    default:
+                        throw std::domain_error("Operator has recognized its arguments, but there is no known way to create corresponding expression");
                 }
                 break;
             }
@@ -995,7 +1009,8 @@ std::shared_ptr<expression> parse(const std::string& line)
 
     if (stack.size() != 1)
     {
-        throw std::length_error(std::string("Invalid expression stack: expected only one element in stack after expression tree creation, got ") + std::to_string(stack.size()));
+        const std::string message = "Invalid expression stack: expected only one element in stack after expression tree creation, got ";
+        throw std::length_error(message + std::to_string(stack.size()));
     }
 
     return stack.top();
@@ -1204,17 +1219,17 @@ TEST_CASE("complete suite")
 
 // This one I was too lazy to write myself. CC-BY-SA 4.0 at https://stackoverflow.com/a/50631844
 // I use this one only for static_assert's to check implementation consistency
-template<typename L, typename R>
+template <typename L, typename R>
 struct has_operator_equals_impl
 {
-    template<typename T = L, typename U = R> // template parameters here to enable SFINAE
+    template <typename T = L, typename U = R> // template parameters here to enable SFINAE
     static auto test(T&& t, U&& u) -> decltype(t == u, void(), std::true_type{});
-    static auto test(...)->std::false_type;
+    static auto test(...) -> std::false_type;
     using type = decltype(test(std::declval<L>(), std::declval<R>()));
 };
 
 // Those are my own though.
-template<typename L, typename R>
+template <typename L, typename R>
 struct has_operator_equals
 {
 private:
@@ -1224,7 +1239,7 @@ public:
     typedef std::conditional_t<type_forward::value && type_backward::value, std::true_type, std::false_type> type;
 };
 
-template<typename L, typename R>
+template <typename L, typename R>
 using has_operator_equals_t = typename has_operator_equals<L, R>::type;
 
 static_assert(has_operator_equals_t<number_expression, expression>::value, "number_expression");
