@@ -273,7 +273,7 @@ class unary_expression : public expression
     std::shared_ptr<expression> inner_;
 
 public:
-    unary_expression(const std::shared_ptr<expression>& inner)
+    explicit unary_expression(const std::shared_ptr<expression>& inner)
         : inner_(inner)
     {
         assert(inner);
@@ -327,35 +327,10 @@ protected:
     }
 };
 
-// A bit of SFINAE again. I hate copy-paste, and prefer to avoid preprocessor macros.
-template <typename T, std::enable_if_t<std::is_base_of<unary_expression, type_decay_t<T>>::value>* = nullptr>
-std::shared_ptr<expression> create(const std::shared_ptr<expression>& inner)
-{
-    if (!inner)
-        return nullptr;
-
-    return std::make_shared<T>(inner);
-}
-
-template <typename T, std::enable_if_t<std::is_base_of<binary_expression, type_decay_t<T>>::value>* = nullptr>
-std::shared_ptr<expression> create(const std::shared_ptr<expression>& left, const std::shared_ptr<expression>& right)
-{
-    if (!left && !right)
-        return nullptr;
-
-    if (left && !right)
-        return left;
-
-    if (!left && right)
-        return right;
-
-    return std::make_shared<T>(left, right);
-}
-
 class minus_expression final : public unary_expression
 {
 public:
-    minus_expression(const std::shared_ptr<expression>& inner)
+    explicit minus_expression(const std::shared_ptr<expression>& inner)
         : unary_expression(inner)
     {
     }
@@ -369,7 +344,7 @@ public:
 
     std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
-        return create<minus_expression>(inner()->differentiate(variable));
+        return create(inner()->differentiate(variable));
     }
 
     format_context& format(format_context& context) const override
@@ -381,7 +356,15 @@ public:
     std::shared_ptr<expression> clone(std::initializer_list<std::shared_ptr<expression>> args) const override
     {
         assert(args.size() == 1);
-        return create<minus_expression>(*args.begin());
+        return create(*args.begin());
+    }
+
+    static std::shared_ptr<minus_expression> create(const std::shared_ptr<expression>& inner)
+    {
+        if (!inner)
+            return nullptr;
+
+        return std::make_shared<minus_expression>(inner);
     }
 };
 
@@ -402,6 +385,21 @@ public:
     {
     }
 
+    static std::shared_ptr<expression> create(const std::shared_ptr<expression>& left,
+                                              const std::shared_ptr<expression>& right)
+    {
+        if (!left && !right)
+            return nullptr;
+
+        if (left && !right)
+            return left;
+
+        if (!left && right)
+            return right;
+
+        return std::make_shared<add_expression>(left, right);
+    }
+
     ~add_expression() override = default;
 
     add_expression(const add_expression& other) = default;
@@ -411,7 +409,7 @@ public:
 
     std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
-        return create<add_expression>(left()->differentiate(variable), right()->differentiate(variable));
+        return create(left()->differentiate(variable), right()->differentiate(variable));
     }
 
     format_context& format(format_context& context) const override
@@ -424,7 +422,7 @@ public:
     {
         assert(args.size() == 2);
         const auto it = args.begin();
-        return create<add_expression>(*it, *(it + 1));
+        return create(*it, *(it + 1));
     }
 };
 
@@ -436,6 +434,21 @@ public:
     {
     }
 
+    static std::shared_ptr<expression> create(const std::shared_ptr<expression>& left,
+                                              const std::shared_ptr<expression>& right)
+    {
+        if (!left && !right)
+            return nullptr;
+
+        if (left && !right)
+            return left;
+
+        if (!left && right)
+            return minus_expression::create(right);
+
+        return std::make_shared<sub_expression>(left, right);
+    }
+
     ~sub_expression() override = default;
 
     sub_expression(const sub_expression& other) = default;
@@ -445,7 +458,7 @@ public:
 
     std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
-        return create<sub_expression>(left()->differentiate(variable), right()->differentiate(variable));
+        return create(left()->differentiate(variable), right()->differentiate(variable));
     }
 
     format_context& format(format_context& context) const override
@@ -458,7 +471,7 @@ public:
     {
         assert(args.size() == 2);
         const auto it = args.begin();
-        return create<sub_expression>(*it, *(it + 1));
+        return create(*it, *(it + 1));
     }
 };
 
@@ -479,6 +492,15 @@ public:
     {
     }
 
+    static std::shared_ptr<mul_expression> create(const std::shared_ptr<expression>& left,
+                                                  const std::shared_ptr<expression>& right)
+    {
+        if (!left || !right)
+            return nullptr;
+
+        return std::make_shared<mul_expression>(left, right);
+    }
+
     ~mul_expression() override = default;
 
     mul_expression(const mul_expression& other) = default;
@@ -488,9 +510,9 @@ public:
 
     std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
-        auto const lhs = create<mul_expression>(left()->differentiate(variable), right());
-        auto const rhs = create<mul_expression>(left(), right()->differentiate(variable));
-        return create<add_expression>(lhs, rhs);
+        auto const lhs = create(left()->differentiate(variable), right());
+        auto const rhs = create(left(), right()->differentiate(variable));
+        return add_expression::create(lhs, rhs);
     }
 
     format_context& format(format_context& context) const override
@@ -503,7 +525,7 @@ public:
     {
         assert(args.size() == 2);
         const auto it = args.begin();
-        return create<mul_expression>(*it, *(it + 1));
+        return create(*it, *(it + 1));
     }
 };
 
@@ -515,6 +537,9 @@ public:
     {
     }
 
+    static std::shared_ptr<expression> create(const std::shared_ptr<expression>& left,
+                                              const std::shared_ptr<expression>& right);
+
     ~div_expression() override = default;
 
     div_expression(const div_expression& other) = default;
@@ -524,11 +549,11 @@ public:
 
     std::shared_ptr<expression> differentiate(const variable_expression& variable) const override
     {
-        auto const lhs = create<mul_expression>(left()->differentiate(variable), right());
-        auto const rhs = create<mul_expression>(left(), right()->differentiate(variable));
-        auto const num = create<sub_expression>(lhs, rhs);
-        auto const den = create<mul_expression>(right(), right());
-        return create<div_expression>(num, den);
+        auto const lhs = mul_expression::create(left()->differentiate(variable), right());
+        auto const rhs = mul_expression::create(left(), right()->differentiate(variable));
+        auto const num = sub_expression::create(lhs, rhs);
+        auto const den = mul_expression::create(right(), right());
+        return create(num, den);
     }
 
     format_context& format(format_context& context) const override
@@ -541,7 +566,7 @@ public:
     {
         assert(args.size() == 2);
         const auto it = args.begin();
-        return create<div_expression>(*it, *(it + 1));
+        return create(*it, *(it + 1));
     }
 };
 
@@ -664,6 +689,15 @@ std::shared_ptr<integral_expression> create(const storage_type value)
     return std::make_shared<number_expression>(value);
 }
 
+std::shared_ptr<expression> div_expression::create(const std::shared_ptr<expression>& left,
+                                                   const std::shared_ptr<expression>& right)
+{
+    if (!left)
+        return nullptr;
+
+    return std::make_shared<div_expression>(left, right ? right : ::create(0));
+}
+
 std::shared_ptr<expression> variable_expression::differentiate(const variable_expression& variable) const
 {
     if (this->name() == variable.name())
@@ -701,7 +735,9 @@ std::shared_ptr<expression> expand(std::shared_ptr<expression> expr, const bool 
             {
                 if (const auto lhs = std::dynamic_pointer_cast<const sum_expression>(ptr->left()))
                 {
-                    expr = lhs->clone({ ptr->clone({ lhs->left(), ptr->right() }), ptr->clone({ lhs->right(), ptr->right() }) });
+                    expr = lhs->clone({
+                        ptr->clone({lhs->left(), ptr->right()}), ptr->clone({lhs->right(), ptr->right()})
+                    });
                     continue;
                 }
             }
@@ -710,7 +746,9 @@ std::shared_ptr<expression> expand(std::shared_ptr<expression> expr, const bool 
             {
                 if (const auto rhs = std::dynamic_pointer_cast<const sum_expression>(ptr->right()))
                 {
-                    expr = rhs->clone({ ptr->clone({ ptr->left(), rhs->left() }), ptr->clone({ ptr->left(), rhs->right() }) });
+                    expr = rhs->clone({
+                        ptr->clone({ptr->left(), rhs->left()}), ptr->clone({ptr->left(), rhs->right()})
+                    });
                     continue;
                 }
             }
@@ -721,7 +759,7 @@ std::shared_ptr<expression> expand(std::shared_ptr<expression> expr, const bool 
             const auto replacement = expand(ptr->inner(), separate_fractions);
             if (replacement != ptr->inner())
             {
-                expr = ptr->clone({ replacement });
+                expr = ptr->clone({replacement});
                 continue;
             }
         }
@@ -731,14 +769,14 @@ std::shared_ptr<expression> expand(std::shared_ptr<expression> expr, const bool 
             const auto lhs = expand(ptr->left(), separate_fractions);
             if (lhs != ptr->left())
             {
-                expr = ptr->clone({ lhs, ptr->right() });
+                expr = ptr->clone({lhs, ptr->right()});
                 continue;
             }
 
             const auto rhs = expand(ptr->right(), separate_fractions);
             if (rhs != ptr->right())
             {
-                expr = ptr->clone({ ptr->left(), rhs });
+                expr = ptr->clone({ptr->left(), rhs});
                 continue;
             }
         }
@@ -797,7 +835,7 @@ std::shared_ptr<expression> canonicalize(std::shared_ptr<expression> expr)
                 // x*2 -> 2*x (or any other non-integral expression)
                 if (!lhs)
                 {
-                    expr = create<mul_expression>(rhs, mul->left());
+                    expr = mul_expression::create(rhs, mul->left());
                     continue;
                 }
             }
@@ -848,7 +886,7 @@ std::shared_ptr<expression> canonicalize(std::shared_ptr<expression> expr)
             const auto replacement = canonicalize(ptr->inner());
             if (replacement != ptr->inner())
             {
-                expr = ptr->clone({ replacement });
+                expr = ptr->clone({replacement});
                 continue;
             }
         }
@@ -858,18 +896,19 @@ std::shared_ptr<expression> canonicalize(std::shared_ptr<expression> expr)
             const auto lhs = canonicalize(ptr->left());
             if (lhs != ptr->left())
             {
-                expr = ptr->clone({ lhs, ptr->right() });
+                expr = ptr->clone({lhs, ptr->right()});
                 continue;
             }
 
             const auto rhs = canonicalize(ptr->right());
             if (rhs != ptr->right())
             {
-                expr = ptr->clone({ ptr->left(), rhs });
+                expr = ptr->clone({ptr->left(), rhs});
                 continue;
             }
         }
-    } while (old_value.lock() != expr);
+    }
+    while (old_value.lock() != expr);
 
     return expr;
 }
@@ -890,8 +929,12 @@ std::shared_ptr<expression> canonicalize_nested(std::shared_ptr<expression> expr
             const auto rhs_mul = std::dynamic_pointer_cast<mul_expression>(mul->right());
             const auto lhs_div = std::dynamic_pointer_cast<div_expression>(mul->left());
             const auto rhs_div = std::dynamic_pointer_cast<div_expression>(mul->right());
-            const auto lhs_product_lhs_integral = lhs_product ? std::dynamic_pointer_cast<integral_expression>(lhs_product->left()) : nullptr;
-            const auto rhs_product_lhs_integral = rhs_product ? std::dynamic_pointer_cast<integral_expression>(rhs_product->left()) : nullptr;
+            const auto lhs_product_lhs_integral = lhs_product
+                                                      ? std::dynamic_pointer_cast<integral_expression>(lhs_product->left())
+                                                      : nullptr;
+            const auto rhs_product_lhs_integral = rhs_product
+                                                      ? std::dynamic_pointer_cast<integral_expression>(rhs_product->left())
+                                                      : nullptr;
             const auto lhs_integral = std::dynamic_pointer_cast<integral_expression>(mul->left());
             const auto rhs_integral = std::dynamic_pointer_cast<integral_expression>(mul->right());
 
@@ -900,9 +943,12 @@ std::shared_ptr<expression> canonicalize_nested(std::shared_ptr<expression> expr
                 const auto value = lhs_product_lhs_integral->value() * rhs_product_lhs_integral->value();
                 if (value != 1)
                 {
-                    const auto lhs_product_modified = canonicalize(lhs_product->clone({ create(1), lhs_product->right() }));
-                    const auto rhs_product_modified = canonicalize(rhs_product->clone({ create(1), rhs_product->right() }));
-                    expr = create<mul_expression>(create(value), expr->clone({ lhs_product_modified, rhs_product_modified }));
+                    const auto lhs_product_modified = lhs_product->clone({create(1), lhs_product->right()});
+                    const auto rhs_product_modified = rhs_product->clone({create(1), rhs_product->right()});
+                    const auto product_modified = expr->clone({
+                        canonicalize(lhs_product_modified), canonicalize(rhs_product_modified)
+                    });
+                    expr = mul_expression::create(create(value), product_modified);
                     continue;
                 }
             }
@@ -912,8 +958,8 @@ std::shared_ptr<expression> canonicalize_nested(std::shared_ptr<expression> expr
                 const auto value = lhs_integral->value() * rhs_product_lhs_integral->value();
                 if (value != 1 && rhs_product_lhs_integral->value() != 1)
                 {
-                    const auto rhs_product_modified = canonicalize(rhs_product->clone({ create(1), rhs_product->right() }));
-                    expr = create<mul_expression>(create(value), rhs_product_modified);
+                    const auto rhs_product_modified = rhs_product->clone({create(1), rhs_product->right()});
+                    expr = mul_expression::create(create(value), canonicalize(rhs_product_modified));
                     continue;
                 }
             }
@@ -923,23 +969,23 @@ std::shared_ptr<expression> canonicalize_nested(std::shared_ptr<expression> expr
 
             if (lhs_div && rhs_div)
             {
-                auto numerator = create<mul_expression>(lhs_div->left(), rhs_div->left());
-                auto denominator = create<mul_expression>(lhs_div->right(), rhs_div->right());
-                expr = create<div_expression>(numerator, denominator);
+                auto numerator = mul_expression::create(lhs_div->left(), rhs_div->left());
+                auto denominator = mul_expression::create(lhs_div->right(), rhs_div->right());
+                expr = div_expression::create(numerator, denominator);
                 continue;
             }
 
             if (rhs_div)
             {
-                auto numerator = create<mul_expression>(mul->left(), rhs_div->left());
-                expr = create<div_expression>(numerator, rhs_div->right());
+                auto numerator = mul_expression::create(mul->left(), rhs_div->left());
+                expr = div_expression::create(numerator, rhs_div->right());
                 continue;
             }
 
             if (lhs_div)
             {
-                auto numerator = create<mul_expression>(rhs_div->left(), mul->right());
-                expr = create<div_expression>(numerator, lhs_div->right());
+                auto numerator = mul_expression::create(rhs_div->left(), mul->right());
+                expr = div_expression::create(numerator, lhs_div->right());
                 continue;
             }
         }
@@ -949,7 +995,7 @@ std::shared_ptr<expression> canonicalize_nested(std::shared_ptr<expression> expr
             const auto replacement = canonicalize_nested(ptr->inner());
             if (replacement != ptr->inner())
             {
-                expr = ptr->clone({ replacement });
+                expr = ptr->clone({replacement});
                 continue;
             }
         }
@@ -959,18 +1005,19 @@ std::shared_ptr<expression> canonicalize_nested(std::shared_ptr<expression> expr
             const auto lhs = canonicalize_nested(ptr->left());
             if (lhs != ptr->left())
             {
-                expr = ptr->clone({ lhs, ptr->right() });
+                expr = ptr->clone({lhs, ptr->right()});
                 continue;
             }
 
             const auto rhs = canonicalize_nested(ptr->right());
             if (rhs != ptr->right())
             {
-                expr = ptr->clone({ ptr->left(), rhs });
+                expr = ptr->clone({ptr->left(), rhs});
                 continue;
             }
         }
-    } while (old_value.lock() != expr);
+    }
+    while (old_value.lock() != expr);
 
     return expr;
 }
@@ -994,8 +1041,8 @@ std::shared_ptr<expression> simplify(std::shared_ptr<expression> expr, const boo
         }
 
         step++;
-
-    } while (old_value.lock() != expr);
+    }
+    while (old_value.lock() != expr);
 
     return expr;
 }
@@ -1388,21 +1435,21 @@ std::shared_ptr<expression> parse(const std::string& line)
                 switch (item.operator_kind)
                 {
                     case operator_kind::add:
-                        stack.emplace(create<add_expression>(arguments.front(), arguments.back()));
+                        stack.emplace(add_expression::create(arguments.front(), arguments.back()));
                         break;
                     case operator_kind::sub:
-                        stack.emplace(create<sub_expression>(arguments.front(), arguments.back()));
+                        stack.emplace(sub_expression::create(arguments.front(), arguments.back()));
                         break;
                     case operator_kind::mul:
-                        stack.emplace(create<mul_expression>(arguments.front(), arguments.back()));
+                        stack.emplace(mul_expression::create(arguments.front(), arguments.back()));
                         break;
                     case operator_kind::div:
-                        stack.emplace(create<div_expression>(arguments.front(), arguments.back()));
+                        stack.emplace(div_expression::create(arguments.front(), arguments.back()));
                         break;
                     case operator_kind::pow:
                         throw std::domain_error("Power operator not implemented");
                     case operator_kind::minus:
-                        stack.emplace(create<minus_expression>(arguments.front()));
+                        stack.emplace(minus_expression::create(arguments.front()));
                         break;
                     default:
                         throw std::domain_error("Operator has recognized its arguments, but there is no known way to create corresponding expression");
@@ -1472,8 +1519,11 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
 }
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
-std::string str(std::shared_ptr<const expression> const& expression, bool implicit_scopes = false)
+std::string str(std::shared_ptr<expression> const& expression, bool implicit_scopes = false)
 {
+    if (!expression)
+        return "nullptr";
+
     std::ostringstream buffer;
 
     expression::format_context context(buffer);
@@ -1555,8 +1605,8 @@ TEST_CASE("numbers are parsed correctly")
 std::shared_ptr<integral_expression> test_one = create(1);
 std::shared_ptr<integral_expression> test_two = create(2);
 std::shared_ptr<integral_expression> test_three = create(3);
-std::shared_ptr<expression> test_one_plus_two = create<add_expression>(test_one, test_two);
-std::shared_ptr<expression> test_three_plus_two = create<add_expression>(test_three, test_two);
+std::shared_ptr<expression> test_one_plus_two = add_expression::create(test_one, test_two);
+std::shared_ptr<expression> test_three_plus_two = add_expression::create(test_three, test_two);
 variable_expression variable_y("y");
 variable_expression variable_z("z");
 
@@ -1779,15 +1829,17 @@ TEST_CASE("complete suite")
 
         CHECK_EQ(str(expression, true), "(x*x*x*x+8*x*y*y*y)/(x+2*y)");
 
-        auto const derivative_x = simplify(expression->differentiate(variable_x));
+        auto derivative_x = simplify(expression->differentiate(variable_x));
 
         CHECK_EQ(str(derivative_x, true), "3*x*x-4*x*y+4*y*y");
+
+        derivative_x = parse("3*x*x-4*x*y+4*y*y");
 
         auto const derivative_xx = simplify(derivative_x->differentiate(variable_x));
 
         CHECK_EQ(str(derivative_xx, true), "6*x-4*y");
 
-        auto const derivative_xxy = simplify(derivative_x->differentiate(variable_y));
+        auto const derivative_xxy = simplify(derivative_xx->differentiate(variable_y));
 
         CHECK_EQ(str(derivative_xxy, true), "-4");
     }
@@ -1837,12 +1889,15 @@ public:
 template <typename L, typename R>
 using has_operator_equals_t = typename has_operator_equals<L, R>::type;
 
+static_assert(has_operator_equals_t<expression, expression>::value, "expression");
 static_assert(has_operator_equals_t<number_expression, expression>::value, "number_expression");
-static_assert(has_operator_equals_t<variable_expression, expression>::value, "VariableExpression");
-static_assert(has_operator_equals_t<add_expression, expression>::value, "AddExpression");
-static_assert(has_operator_equals_t<sub_expression, expression>::value, "SubExpression");
-static_assert(has_operator_equals_t<mul_expression, expression>::value, "MulExpression");
-static_assert(has_operator_equals_t<integral_expression, expression>::value, "IntegralExpression");
+static_assert(has_operator_equals_t<variable_expression, expression>::value, "variable_expression");
+static_assert(has_operator_equals_t<add_expression, expression>::value, "add_expression");
+static_assert(has_operator_equals_t<sub_expression, expression>::value, "sub_expression");
+static_assert(has_operator_equals_t<mul_expression, expression>::value, "mul_expression");
+static_assert(has_operator_equals_t<div_expression, expression>::value, "div_expression");
+static_assert(has_operator_equals_t<minus_expression, expression>::value, "minus_expression");
+static_assert(has_operator_equals_t<integral_expression, expression>::value, "integral_expression");
 static_assert(has_operator_equals_t<number_expression, expression>::value, "number_expression");
-static_assert(has_operator_equals_t<zero_expression, expression>::value, "ZeroExpression");
+static_assert(has_operator_equals_t<zero_expression, expression>::value, "zero_expression");
 #endif
