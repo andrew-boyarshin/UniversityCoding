@@ -6,3 +6,4 @@ find_package (doctest CONFIG REQUIRED)
 
 add_subdirectory ("Task1A")
 add_subdirectory ("Task2A")
+add_subdirectory ("Task3A")
