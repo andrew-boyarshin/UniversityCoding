@@ -132,7 +132,7 @@ struct hash_map_node final
     using pointer_type = self_type*;
     using next_pointer = pointer_type;
 
-    next_pointer* next = nullptr;
+    next_pointer next = nullptr;
 
 private:
     using non_const_ref_value_type = std::pair<key_type&, mapped_type&>;
@@ -197,20 +197,21 @@ public:
     ~hash_map_node() = delete;
 };
 
-template <typename Value>
+template <typename T>
 struct hash_map_bucket final
 {
-    using value_type = Value;
-    using pointer_type = typename value_type::pointer_type;
-    using next_pointer = typename value_type::next_pointer;
-    using self_type = hash_map_bucket<value_type>;
+    using node_type = T;
+    using item_value_type = typename node_type::value_type;
+    using self_type = hash_map_bucket<node_type>;
+    using next_pointer = self_type*;
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
-    static_assert(!std::is_pointer_v<value_type>, "hash_map_bucket<T*> not allowed");
+    static_assert(!std::is_pointer_v<node_type>, "hash_map_bucket<T*> not allowed");
+    static_assert(std::is_same_v<T*, typename node_type::next_pointer>, "node pointer type mismatch");
 #endif
 
-    next_pointer head = nullptr;
-    self_type* next_bucket = nullptr;
+    node_type* head = nullptr;
+    next_pointer next_bucket = nullptr;
 
     explicit hash_map_bucket() = default;
     ~hash_map_bucket() = default;
@@ -247,16 +248,24 @@ struct hash_map_bucket_list final
     hash_map_bucket_list& operator=(const hash_map_bucket_list& other) = delete;
     hash_map_bucket_list& operator=(hash_map_bucket_list&& other) noexcept = delete;
 
-    bucket_type& operator[](size_type hash)
+    bucket_type& by_index(const size_type index)
     {
-        const auto index = bucket_index_by_hash(hash, used.size());
-        return array.list[index];
+        return array[index];
     }
 
-    const bucket_type& operator[](size_type hash) const
+    const bucket_type& by_index(const size_type index) const
     {
-        const auto index = bucket_index_by_hash(hash, used.size());
-        return array.list[index];
+        return array[index];
+    }
+
+    bucket_type& by_hash(const size_type hash)
+    {
+        return by_index(bucket_index_by_hash(hash, used));
+    }
+
+    const bucket_type& by_hash(const size_type hash) const
+    {
+        return by_index(bucket_index_by_hash(hash, used));
     }
 
 private:
@@ -267,20 +276,103 @@ private:
 template <typename Key, typename Value, typename Hash = std::hash<Key>, typename Equal = std::equal_to<Key>>
 struct hash_map;
 
-template <typename Value>
-struct hash_map_iterator final
+template <typename QualifiedNodeType, typename BucketType, typename Derived>
+struct hash_map_iterator_base
+{
+protected:
+    using derived = Derived;
+
+    using bucket_type = BucketType;
+    using value_type = typename bucket_type::item_value_type;
+    using qualified_node_type = QualifiedNodeType;
+
+    static_assert(std::is_same_v<typename bucket_type::node_type, std::remove_const_t<QualifiedNodeType>>, "Node type mismatch (using const-aware comparison)");
+
+    qualified_node_type* node_ = nullptr;
+    const bucket_type* bucket_ = nullptr;
+
+    void verify_node() const
+    {
+        if (node_)
+        {
+            return;
+        }
+
+        throw std::out_of_range("Attempt to dereference a non-dereferenceable iterator");
+    }
+
+    void roll_to_node()
+    {
+        while (bucket_ && !node_)
+        {
+            bucket_ = bucket_->next_bucket;
+            node_ = bucket_ ? bucket_->head : nullptr;
+        }
+    }
+
+    void initialize(const bucket_type* const bucket, qualified_node_type* const node)
+    {
+        bucket_ = bucket;
+        node_ = node;
+
+        if (!bucket_)
+        {
+            if (node_)
+            {
+                throw std::exception("iterator::initialize: !bucket && node");
+            }
+
+            return;
+        }
+
+        node_ = bucket_->head;
+        roll_to_node();
+    }
+
+    template <typename, typename, typename, typename>
+    friend struct hash_map;
+
+public:
+    derived& operator++()
+    {
+        if (node_)
+        {
+            node_ = node_->next;
+            roll_to_node();
+        }
+        return static_cast<derived&>(*this);
+    }
+
+    derived& operator++(int)
+    {
+        derived copy(*this);
+        ++(*this);
+        return copy;
+    }
+
+    friend bool operator==(const derived& lhs, const derived& rhs)
+    {
+        return lhs.node_ == rhs.node_ && lhs.bucket_ == rhs.bucket_;
+    }
+
+    friend bool operator!=(const derived& lhs, const derived& rhs)
+    {
+        return !(lhs == rhs);
+    }
+};
+
+template <typename BucketType>
+struct hash_map_iterator final : hash_map_iterator_base<typename BucketType::node_type, BucketType, hash_map_iterator<BucketType>>
 {
     using iterator_category = std::forward_iterator_tag;
 
-    using value_type = typename Value::value_type;
+    using base = hash_map_iterator_base<typename BucketType::node_type, BucketType, hash_map_iterator<BucketType>>;
 
-private:
-    using next_pointer = typename Value::pointer_type;
+    using bucket_type = typename base::bucket_type;
+    using value_type = typename base::value_type;
+    using qualified_node_type = typename base::qualified_node_type;
 
-    next_pointer node_ = nullptr;
-
-public:
-    hash_map_iterator() = default;
+    hash_map_iterator() = delete;
     ~hash_map_iterator() = default;
     hash_map_iterator(const hash_map_iterator& other) = default;
     hash_map_iterator(hash_map_iterator&& other) noexcept = default;
@@ -289,40 +381,73 @@ public:
 
     value_type& operator*() const
     {
+        verify_node();
+
         return node_->get();
     }
 
     value_type* operator->() const
     {
+        verify_node();
+
         return std::addressof(node_->get());
     }
 
-    hash_map_iterator& operator++()
+private:
+    explicit hash_map_iterator(bucket_type* const bucket, qualified_node_type* const node = nullptr)
     {
-        node_ = node_->next;
-        return *this;
+        initialize(bucket, node);
     }
 
-    hash_map_iterator& operator++(int)
+    explicit hash_map_iterator(bucket_type& bucket, qualified_node_type* const node = nullptr)
+        : hash_map_iterator(std::addressof(bucket), node)
     {
-        hash_map_iterator copy(*this);
-        ++(*this);
-        return copy;
     }
 
-    friend bool operator==(const hash_map_iterator& lhs, const hash_map_iterator& rhs)
+    template <typename, typename, typename, typename>
+    friend struct hash_map;
+};
+
+template <typename BucketType>
+struct hash_map_const_iterator final : hash_map_iterator_base<const typename BucketType::node_type, BucketType, hash_map_const_iterator<BucketType>>
+{
+    using iterator_category = std::forward_iterator_tag;
+
+    using base = hash_map_iterator_base<const typename BucketType::node_type, BucketType, hash_map_const_iterator<BucketType>>;
+
+    using bucket_type = typename base::bucket_type;
+    using value_type = typename base::value_type;
+    using qualified_node_type = typename base::qualified_node_type;
+
+    hash_map_const_iterator() = delete;
+    ~hash_map_const_iterator() = default;
+    hash_map_const_iterator(const hash_map_const_iterator& other) = default;
+    hash_map_const_iterator(hash_map_const_iterator&& other) noexcept = default;
+    hash_map_const_iterator& operator=(const hash_map_const_iterator& other) = default;
+    hash_map_const_iterator& operator=(hash_map_const_iterator&& other) noexcept = default;
+
+    const value_type& operator*() const
     {
-        return lhs.node_ == rhs.node_;
+        verify_node();
+
+        return node_->get();
     }
 
-    friend bool operator!=(const hash_map_iterator& lhs, const hash_map_iterator& rhs)
+    const value_type* operator->() const
     {
-        return !(lhs == rhs);
+        verify_node();
+
+        return std::addressof(node_->get());
     }
 
 private:
-    explicit hash_map_iterator(const next_pointer& node)
-        : node_(node)
+    explicit hash_map_const_iterator(const bucket_type* const bucket, qualified_node_type* const node = nullptr)
+    {
+        initialize(bucket, node);
+    }
+
+    explicit hash_map_const_iterator(const bucket_type& bucket, qualified_node_type* const node = nullptr)
+        : hash_map_const_iterator(std::addressof(bucket), node)
     {
     }
 
@@ -351,64 +476,113 @@ public:
     using const_pointer = const value_type*;
     using size_type = std::size_t;
     using difference_type = std::ptrdiff_t;
-    using iterator = hash_map_iterator<node_type>;
-    using const_iterator = hash_map_iterator<node_type>;
-    using local_iterator = hash_map_iterator<node_type>;
-    using const_local_iterator = hash_map_iterator<node_type>;
+    using iterator = hash_map_iterator<bucket_type>;
+    using const_iterator = hash_map_const_iterator<bucket_type>;
+    using local_iterator = hash_map_iterator<bucket_type>;
+    using const_local_iterator = hash_map_iterator<bucket_type>;
 
 private:
     using bucket_list_type = hash_map_bucket_list<bucket_type, size_type>;
     using is_nothrow_1 = std::is_nothrow_default_constructible<hasher>;
     using is_nothrow_2 = std::is_nothrow_default_constructible<key_equal>;
 
+    constexpr static size_type default_bucket_count = 64;
+
     bucket_list_type bucket_list_;
     hasher hasher_;
     key_equal key_equal_;
     size_type size_ = 0;
+    float max_load_factor_ = 1.0f;
 
 public:
-    hash_map() noexcept(is_nothrow_1::value && is_nothrow_2::value) = default;
-    bool empty() const noexcept { return size() == 0; }
-    size_type size() const noexcept { return size_; }
-    size_type max_size() const noexcept;
-    iterator begin() noexcept;
+    hash_map() noexcept(is_nothrow_1::value && is_nothrow_2::value)
+        : hash_map(default_bucket_count)
+    {
+    }
+
+    explicit hash_map(size_type n, const hasher& hf = hasher(), const key_equal& eql = key_equal());
+
+    template<typename InputIterator>
+    hash_map(InputIterator f, InputIterator l, size_type n = default_bucket_count, const hasher& hf = hasher(), const key_equal& eql = key_equal());
+
+    hash_map(std::initializer_list<value_type> il, size_type n = default_bucket_count, const hasher& hf = hasher(), const key_equal& eql = key_equal());
+
+    bool empty() const noexcept
+    {
+        return size() == 0;
+    }
+
+    size_type size() const noexcept
+    {
+        return size_;
+    }
+
+    size_type max_size() const noexcept
+    {
+        return std::numeric_limits<difference_type>::max();
+    }
+
+    iterator begin() noexcept
+    {
+        return iterator{bucket_list_.by_index(0)};
+    }
+
     iterator end() noexcept
     {
-        return iterator(nullptr);
+        return iterator{nullptr};
     }
-    const_iterator begin() const noexcept;
+
+    const_iterator begin() const noexcept
+    {
+        return const_iterator{bucket_list_.by_index(0)};
+    }
+
     const_iterator end() const noexcept
     {
-        return const_iterator(nullptr);
+        return const_iterator{nullptr};
     }
-    const_iterator cbegin() const noexcept;
+
+    const_iterator cbegin() const noexcept
+    {
+        return const_iterator{bucket_list_.by_index(0)};
+    }
+
     const_iterator cend() const noexcept
     {
-        return const_iterator(nullptr);
+        return const_iterator{nullptr};
     }
-    template <class... Args>
+
+    template <typename... Args>
     iterator emplace(Args&&... args);
-    template <class... Args>
+    template <typename... Args>
     iterator emplace_hint(const_iterator position, Args&&... args);
     iterator insert(const value_type& obj);
 
-    template <class P>
+    template <typename P>
     iterator insert(P&& obj)
     {
         return emplace(std::forward<P>(obj));
     }
 
-    iterator insert(const_iterator hint, const value_type& obj);
+    iterator insert(const_iterator, const value_type& obj)
+    {
+        return insert(obj).first;
+    }
 
-    template <class P>
+    template <typename P>
     iterator insert(const_iterator hint, P&& obj)
     {
         return emplace_hint(hint, std::forward<P>(obj));
     }
 
-    template <class InputIterator>
+    template <typename InputIterator>
     void insert(InputIterator first, InputIterator last);
-    void insert(std::initializer_list<value_type>);
+
+    void insert(std::initializer_list<value_type> list)
+    {
+        insert(list.begin(), list.end());
+    }
+
     node_type extract(const_iterator position); // C++17
 
     node_type extract(const key_type& x)
@@ -419,10 +593,53 @@ public:
         return extract(it);
     }
 
-    iterator insert(node_type&& nh); // C++17
+    // insert_return_type insert(node_type&& nh); // C++17
     iterator insert(const_iterator hint, node_type&& nh); // C++17
+
+    template<typename... Args>
+    std::pair<iterator, bool> try_emplace(const key_type& k, Args&&... args)
+    {
+        return emplace_key_args(k, std::piecewise_construct, std::forward_as_tuple(k), std::forward_as_tuple(std::forward<Args>(args)...));
+    }
+
+    template<typename... Args>
+    std::pair<iterator, bool> try_emplace(key_type&& k, Args&&... args)
+    {
+        return emplace_key_args(k, std::piecewise_construct, std::forward_as_tuple(std::move(k)), std::forward_as_tuple(std::forward<Args>(args)...));
+    }
+
+    template<typename... Args>
+    iterator try_emplace(const_iterator, const key_type& k, Args&&... args)
+    {
+        return try_emplace(k, std::forward<Args>(args)...).first;
+    }
+
+    template<typename... Args>
+    iterator try_emplace(const_iterator, key_type&& k, Args&&... args)
+    {
+        return try_emplace(std::move(k), std::forward<Args>(args)...).first;
+    }
+
+    template<typename M>
+    std::pair<iterator, bool> insert_or_assign(const key_type& k, M&& obj);
+    template<typename M>
+    std::pair<iterator, bool> insert_or_assign(key_type&& k, M&& obj);
+
+    template<typename M>
+    iterator insert_or_assign(const_iterator, const key_type& k, M&& obj)
+    {
+        return insert_or_assign(k, std::forward<M>(obj)).first;
+    }
+
+    template<typename M>
+    iterator insert_or_assign(const_iterator, key_type&& k, M&& obj)
+    {
+        return insert_or_assign(std::move(k), std::forward<M>(obj)).first;
+    }
+
+
     iterator erase(const_iterator position);
-    //iterator erase(iterator position); // C++14
+    iterator erase(iterator position); // C++14
     size_type erase(const key_type& k);
     iterator erase(const_iterator first, const_iterator last);
     void clear() noexcept;
@@ -461,7 +678,7 @@ public:
 
     mapped_type& operator[](key_type&& k)
     {
-        return try_emplace(move(k)).first->second;
+        return try_emplace(std::move(k)).first->second;
     }
 
     mapped_type& at(const key_type& k)
@@ -518,60 +735,169 @@ public:
         return buckets != 0 ? static_cast<float>(size()) / buckets : 0.f;
     }
 
-    float max_load_factor() const noexcept;
-    void max_load_factor(float z);
-    void rehash(size_type n);
+    float max_load_factor() const noexcept
+    {
+        return max_load_factor_;
+    }
+
+    void max_load_factor(float z)
+    {
+        max_load_factor_ = std::max(z, load_factor());
+    }
+
+    void rehash(size_type n)
+    {
+        if (n < 2)
+        {
+            n = 2;
+        }
+
+        const auto bucket_count = this->bucket_count();
+        if (n > bucket_count)
+        {
+            realloc(n);
+            return;
+        }
+
+        // do sth clever with n < bucket_count
+        realloc(n);
+    }
+
     void reserve(size_type n);
 
 private:
     void realloc(size_type n);
+
+    iterator find_within(bucket_type& bucket, const key_type& key)
+    {
+        bucket_node_type* it = bucket.head;
+
+        for (; it; it = it->next)
+        {
+            if (key_equal_(it->get().first, key))
+            {
+                return iterator{bucket, it};
+            }
+        }
+
+        return end();
+    }
+
+    const_iterator find_within(const bucket_type& bucket, const key_type& key) const
+    {
+        bucket_node_type* it = bucket.head;
+
+        for (; it; it = it->next)
+        {
+            if (key_equal_(it->get().first, key))
+            {
+                return const_iterator{bucket, it};
+            }
+        }
+
+        return end();
+    }
+
+    template<typename... Args>
+    std::pair<iterator, bool> emplace_key_args(const key_type& k, Args&&... args);
 };
 
 template <typename Key, typename T, typename Hash, typename Equal>
-typename hash_map<Key, T, Hash, Equal>::iterator hash_map<Key, T, Hash, Equal>::
-begin() noexcept
+hash_map<Key, T, Hash, Equal>::hash_map(const size_type n, const hasher& hf, const key_equal& eql)
+    : hasher_(hf), key_equal_(eql)
 {
-    return iterator(bucket_list_);
+    this->realloc(n);
 }
 
 template <typename Key, typename T, typename Hash, typename Equal>
-template <class InputIterator>
+template <typename InputIterator>
 void hash_map<Key, T, Hash, Equal>::insert(InputIterator first, InputIterator last)
 {
     for (; first != last; ++first)
+    {
         this->insert(*first);
+    }
 }
 
 template <typename Key, typename T, typename Hash, typename Equal>
-typename hash_map<Key, T, Hash, Equal>::size_type hash_map<Key, T, Hash, Equal>::bucket_size(size_type n) const
+typename hash_map<Key, T, Hash, Equal>::size_type hash_map<Key, T, Hash, Equal>::bucket_size(const size_type n) const
 {
-    auto& bucket = bucket_list_.array[n];
+    auto& bucket = bucket_list_.by_index(n);
 
     size_type count = 0;
 
     const auto* it = bucket.head;
     for (; it; it = it->next)
+    {
         count++;
+    }
 
     return count;
 }
 
 template <typename Key, typename T, typename Hash, typename Equal>
-void hash_map<Key, T, Hash, Equal>::realloc(size_type n)
+void hash_map<Key, T, Hash, Equal>::realloc(const size_type n)
 {
     auto ptr = std::make_unique<bucket_type[]>(n);
 
-    auto it = begin();
-    const auto it_end = end();
-    for (; it != it_end; ++it)
+    for (size_type i = 0; i < n - 1; ++i)
     {
-        auto* item = *it;
-        const auto index = bucket_index_by_hash(hash, n);
-        //ptr[index].head = 
+        ptr[i].next_bucket = &ptr[i + 1];
     }
 
-    bucket_list_.array = ptr;
+    iterator it = begin();
+    const iterator it_end = end();
+    for (; it != it_end;)
+    {
+        typename iterator::qualified_node_type* node = it.node_;
+
+        ++it;
+
+        const auto hash = hasher_(node->get().first);
+        const auto index = bucket_index_by_hash(hash, n);
+
+        node->next = ptr[index].head;
+        ptr[index].head = node;
+    }
+
+    bucket_list_.array = std::move(ptr);
     bucket_list_.used = n;
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
+template <typename ... Args>
+std::pair<typename hash_map<Key, T, Hash, Equal>::iterator, bool> hash_map<Key, T, Hash, Equal>::emplace_key_args(
+    const key_type& k, Args&&... args)
+{
+    const auto hash = hasher_(k);
+    auto bucket_count = this->bucket_count();
+    const auto bucket_pressure = bucket_count * max_load_factor();
+
+    if (!bucket_count || size() + 1 > bucket_pressure)
+    {
+        rehash(std::max<size_type>(2 * bucket_count,
+            size_type(ceil(float(size() + 1) / max_load_factor()))));
+
+        bucket_count = this->bucket_count();
+    }
+
+    auto& bucket = bucket_list_.by_hash(hash);
+    
+    iterator entry = find_within(bucket, k);
+
+    if (entry != end())
+    {
+        return std::make_pair(entry, false);
+    }
+
+    auto* node = new bucket_node_type(typename bucket_node_type::value_type{ std::forward<Args>(args)... });
+
+    node->next = bucket.head;
+    bucket.head = node;
+
+    size_++;
+
+    return std::make_pair(iterator{ bucket, node }, true);
 }
 
 // ReSharper disable once CppParameterMayBeConst
@@ -601,11 +927,78 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
 
-TEST_CASE("numbers are printed correctly")
+TEST_CASE("map is created correctly")
 {
     std::int64_t n = 0;
-    DOCTEST_INDEX_PARAMETERIZED_DATA(n, -50, 50);
+    DOCTEST_INDEX_PARAMETERIZED_DATA(n, 1, 50);
 
+    hash_map<std::uint64_t, std::uint8_t> map(n);
+    CHECK_EQ(map.bucket_count(), n);
+    CHECK_EQ(map.size(), 0);
+    CHECK_EQ(map.empty(), true);
+    CHECK_EQ(map.begin(), map.end());
+    CHECK_EQ(map.cbegin(), map.cend());
+}
+
+using my_pair = std::pair<const std::uint64_t, std::uint8_t>;
+bool operator==(const my_pair& lhs, const my_pair& rhs)
+{
+    return lhs.first == rhs.first && lhs.second == rhs.second;
+}
+
+TEST_CASE("map elements are emplaced correctly")
+{
+    hash_map<std::uint64_t, std::uint8_t> map;
+    CHECK_NE(map.bucket_count(), 0);
+    CHECK_EQ(map.size(), 0);
+    CHECK_EQ(map.empty(), true);
+    CHECK_EQ(map.begin(), map.end());
+    CHECK_EQ(map.cbegin(), map.cend());
+
+    map.try_emplace(20, 1);
+
+    CHECK_EQ(map.size(), 1);
+    CHECK_EQ(map.empty(), false);
+    CHECK_NE(map.begin(), map.end());
+    CHECK_NE(map.cbegin(), map.cend());
+
+    map.try_emplace(40, 50);
+
+    CHECK_EQ(map.size(), 2);
+    CHECK_EQ(map.empty(), false);
+    CHECK_NE(map.begin(), map.end());
+    CHECK_NE(map.cbegin(), map.cend());
+
+    std::size_t count = 0, bits = 0;
+
+    for (auto && pair : map)
+    {
+        count++;
+        switch (pair.first)
+        {
+        case 20:
+            CHECK_EQ(bits & 1, 0);
+            bits |= 1;
+            CHECK_EQ(pair.second, 1);
+            break;
+        case 40:
+            CHECK_EQ(bits & 2, 0);
+            bits |= 2;
+            CHECK_EQ(pair.second, 50);
+            break;
+        default:
+            DOCTEST_FAIL_CHECK("nodefault");
+        }
+    }
+
+    CHECK_EQ(count, 2);
+    CHECK_EQ(bits, 3);
+
+    CHECK_EQ(map[20], 1);
+    map[20] = 5;
+    CHECK_EQ(map[20], 5);
+    CHECK_EQ(map[40], 50);
+    CHECK_EQ(map[60], 0);
 }
 
 // This one I was too lazy to write myself. CC-BY-SA 4.0 at https://stackoverflow.com/a/50631844
