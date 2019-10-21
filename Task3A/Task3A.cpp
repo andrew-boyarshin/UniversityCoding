@@ -301,6 +301,7 @@ protected:
         throw std::out_of_range("Attempt to dereference a non-dereferenceable iterator");
     }
 
+    // template <std::enable_if_t<typename Derived::local_iterator_tag>* = nullptr>
     void roll_to_node()
     {
         while (bucket_ && !node_)
@@ -660,15 +661,38 @@ public:
 
     iterator find(const key_type& k);
     const_iterator find(const key_type& k) const;
-    size_type count(const key_type& k) const;
+
+    size_type count(const key_type& k) const
+    {
+        return find(k) != end() ? 1u : 0u;
+    }
 
     bool contains(const key_type& k) const
     {
         return find(k) != end();
     }
 
-    std::pair<iterator, iterator> equal_range(const key_type& k);
-    std::pair<const_iterator, const_iterator> equal_range(const key_type& k) const;
+    std::pair<iterator, iterator> equal_range(const key_type& k)
+    {
+        iterator left = find(k), right = left;
+        if (left != end())
+        {
+            ++right;
+        }
+
+        return std::make_pair(left, right);
+    }
+
+    std::pair<const_iterator, const_iterator> equal_range(const key_type& k) const
+    {
+        const_iterator left = find(k), right = left;
+        if (left != end())
+        {
+            ++right;
+        }
+
+        return std::make_pair(left, right);
+    }
 
     // 22.5.4.3, element access
     mapped_type& operator[](const key_type& k)
@@ -800,6 +824,8 @@ private:
 
     template<typename... Args>
     std::pair<iterator, bool> emplace_key_args(const key_type& k, Args&&... args);
+
+    node_type remove(const_iterator it);
 };
 
 template <typename Key, typename T, typename Hash, typename Equal>
@@ -817,6 +843,57 @@ void hash_map<Key, T, Hash, Equal>::insert(InputIterator first, InputIterator la
     {
         this->insert(*first);
     }
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
+void hash_map<Key, T, Hash, Equal>::clear() noexcept
+{
+    iterator it = begin();
+    const iterator it_end = end();
+    for (; it != it_end;)
+    {
+        typename iterator::qualified_node_type* node = it.node_;
+
+        ++it;
+
+        const auto hash = hasher_(node->get().first);
+        const auto index = bucket_index_by_hash(hash, n);
+
+        node->next = ptr[index].head;
+        ptr[index].head = node;
+    }
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
+typename hash_map<Key, T, Hash, Equal>::iterator hash_map<Key, T, Hash, Equal>::find(const key_type& k)
+{
+    const auto hash = hasher_(k);
+    auto bucket_count = this->bucket_count();
+
+    if (bucket_count == 0)
+    {
+        return end();
+    }
+
+    auto& bucket = bucket_list_.by_hash(hash);
+
+    return find_within(bucket, k);
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
+typename hash_map<Key, T, Hash, Equal>::const_iterator hash_map<Key, T, Hash, Equal>::find(const key_type& k) const
+{
+    const auto hash = hasher_(k);
+    auto bucket_count = this->bucket_count();
+
+    if (bucket_count == 0)
+    {
+        return end();
+    }
+
+    auto& bucket = bucket_list_.by_hash(hash);
+
+    return find_within(bucket, k);
 }
 
 template <typename Key, typename T, typename Hash, typename Equal>
@@ -898,6 +975,31 @@ std::pair<typename hash_map<Key, T, Hash, Equal>::iterator, bool> hash_map<Key, 
     size_++;
 
     return std::make_pair(iterator{ bucket, node }, true);
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
+typename hash_map<Key, T, Hash, Equal>::node_type hash_map<Key, T, Hash, Equal>::remove(const_iterator it)
+{
+    const auto hash = hasher_(it->first);
+    auto bucket_count = this->bucket_count();
+
+    if (bucket_count == 0)
+    {
+        throw std::out_of_range("remove: no buckets");
+    }
+
+    auto& bucket = bucket_list_.by_hash(hash);
+
+    bucket_node_type* previous = bucket.head;
+
+    for (; previous; )
+    {
+
+        if (key_equal_(it->get().first, key))
+        {
+            return const_iterator{ bucket, it };
+        }
+    }
 }
 
 // ReSharper disable once CppParameterMayBeConst
