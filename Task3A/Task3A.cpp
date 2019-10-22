@@ -273,17 +273,42 @@ private:
     friend struct hash_map;
 };
 
+struct hash_map_iterator_end_t
+{
+    explicit hash_map_iterator_end_t() = default;
+};
+
+const hash_map_iterator_end_t hash_map_iterator_end;
+
+struct hash_map_iterator_tag
+{
+    explicit hash_map_iterator_tag() = default;
+};
+
+struct hash_map_global_iterator_tag : hash_map_iterator_tag
+{
+    explicit hash_map_global_iterator_tag() = default;
+};
+
+struct hash_map_local_iterator_tag : hash_map_iterator_tag
+{
+    explicit hash_map_local_iterator_tag() = default;
+};
+
 template <typename Key, typename Value, typename Hash = std::hash<Key>, typename Equal = std::equal_to<Key>>
 struct hash_map;
 
-template <typename QualifiedNodeType, typename BucketType, typename Derived>
+template <typename QualifiedNodeType, typename QualifiedValueType, typename BucketType, typename Derived>
 struct hash_map_iterator_base
 {
 protected:
     using derived = Derived;
 
     using bucket_type = BucketType;
-    using value_type = typename bucket_type::item_value_type;
+    using value_type = QualifiedValueType;
+    using difference_type = std::ptrdiff_t;
+    using pointer = value_type*;
+    using reference = value_type&;
     using qualified_node_type = QualifiedNodeType;
 
     static_assert(std::is_same_v<typename bucket_type::node_type, std::remove_const_t<QualifiedNodeType>>, "Node type mismatch (using const-aware comparison)");
@@ -291,6 +316,21 @@ protected:
     qualified_node_type* node_ = nullptr;
     const bucket_type* bucket_ = nullptr;
 
+private:
+    void roll_to_node(hash_map_global_iterator_tag)
+    {
+        while (bucket_ && !node_)
+        {
+            bucket_ = bucket_->next_bucket;
+            node_ = bucket_ ? bucket_->head : nullptr;
+        }
+    }
+
+    void roll_to_node(hash_map_local_iterator_tag)
+    {
+    }
+
+protected:
     void verify_node() const
     {
         if (node_)
@@ -301,14 +341,9 @@ protected:
         throw std::out_of_range("Attempt to dereference a non-dereferenceable iterator");
     }
 
-    // template <std::enable_if_t<typename Derived::local_iterator_tag>* = nullptr>
     void roll_to_node()
     {
-        while (bucket_ && !node_)
-        {
-            bucket_ = bucket_->next_bucket;
-            node_ = bucket_ ? bucket_->head : nullptr;
-        }
+        roll_to_node(typename Derived::hash_map_iterator_category{});
     }
 
     void initialize(const bucket_type* const bucket, qualified_node_type* const node)
@@ -327,6 +362,19 @@ protected:
         }
 
         node_ = bucket_->head;
+        roll_to_node();
+    }
+
+    void initialize_at_end(const bucket_type* const bucket)
+    {
+        bucket_ = bucket;
+        node_ = nullptr;
+
+        if (!bucket_)
+        {
+            return;
+        }
+
         roll_to_node();
     }
 
@@ -351,6 +399,20 @@ public:
         return copy;
     }
 
+    reference operator*() const
+    {
+        verify_node();
+
+        return node_->get();
+    }
+
+    pointer operator->() const
+    {
+        verify_node();
+
+        return std::addressof(node_->get());
+    }
+
     friend bool operator==(const derived& lhs, const derived& rhs)
     {
         return lhs.node_ == rhs.node_ && lhs.bucket_ == rhs.bucket_;
@@ -363,15 +425,19 @@ public:
 };
 
 template <typename BucketType>
-struct hash_map_iterator final : hash_map_iterator_base<typename BucketType::node_type, BucketType, hash_map_iterator<BucketType>>
+struct hash_map_iterator final : hash_map_iterator_base<typename BucketType::node_type, typename BucketType::item_value_type, BucketType, hash_map_iterator<BucketType>>
 {
     using iterator_category = std::forward_iterator_tag;
+    using hash_map_iterator_category = hash_map_global_iterator_tag;
 
-    using base = hash_map_iterator_base<typename BucketType::node_type, BucketType, hash_map_iterator<BucketType>>;
+    using base = hash_map_iterator_base<typename BucketType::node_type, typename BucketType::item_value_type, BucketType, hash_map_iterator<BucketType>>;
 
-    using bucket_type = typename base::bucket_type;
-    using value_type = typename base::value_type;
-    using qualified_node_type = typename base::qualified_node_type;
+    using base::bucket_type;
+    using base::value_type;
+    using base::qualified_node_type;
+    using base::difference_type;
+    using base::pointer;
+    using base::reference;
 
     hash_map_iterator() = delete;
     ~hash_map_iterator() = default;
@@ -380,21 +446,12 @@ struct hash_map_iterator final : hash_map_iterator_base<typename BucketType::nod
     hash_map_iterator& operator=(const hash_map_iterator& other) = default;
     hash_map_iterator& operator=(hash_map_iterator&& other) noexcept = default;
 
-    value_type& operator*() const
-    {
-        verify_node();
-
-        return node_->get();
-    }
-
-    value_type* operator->() const
-    {
-        verify_node();
-
-        return std::addressof(node_->get());
-    }
-
 private:
+    explicit hash_map_iterator(const hash_map_iterator_end_t&)
+    {
+        initialize_at_end(nullptr);
+    }
+
     explicit hash_map_iterator(bucket_type* const bucket, qualified_node_type* const node = nullptr)
     {
         initialize(bucket, node);
@@ -410,15 +467,19 @@ private:
 };
 
 template <typename BucketType>
-struct hash_map_const_iterator final : hash_map_iterator_base<const typename BucketType::node_type, BucketType, hash_map_const_iterator<BucketType>>
+struct hash_map_const_iterator final : hash_map_iterator_base<const typename BucketType::node_type, const typename BucketType::item_value_type, BucketType, hash_map_const_iterator<BucketType>>
 {
     using iterator_category = std::forward_iterator_tag;
+    using hash_map_iterator_category = hash_map_global_iterator_tag;
 
-    using base = hash_map_iterator_base<const typename BucketType::node_type, BucketType, hash_map_const_iterator<BucketType>>;
+    using base = hash_map_iterator_base<const typename BucketType::node_type, const typename BucketType::item_value_type, BucketType, hash_map_const_iterator<BucketType>>;
 
-    using bucket_type = typename base::bucket_type;
-    using value_type = typename base::value_type;
-    using qualified_node_type = typename base::qualified_node_type;
+    using base::bucket_type;
+    using base::value_type;
+    using base::qualified_node_type;
+    using base::difference_type;
+    using base::pointer;
+    using base::reference;
 
     hash_map_const_iterator() = delete;
     ~hash_map_const_iterator() = default;
@@ -427,21 +488,12 @@ struct hash_map_const_iterator final : hash_map_iterator_base<const typename Buc
     hash_map_const_iterator& operator=(const hash_map_const_iterator& other) = default;
     hash_map_const_iterator& operator=(hash_map_const_iterator&& other) noexcept = default;
 
-    const value_type& operator*() const
-    {
-        verify_node();
-
-        return node_->get();
-    }
-
-    const value_type* operator->() const
-    {
-        verify_node();
-
-        return std::addressof(node_->get());
-    }
-
 private:
+    explicit hash_map_const_iterator(const hash_map_iterator_end_t&)
+    {
+        initialize_at_end(nullptr);
+    }
+
     explicit hash_map_const_iterator(const bucket_type* const bucket, qualified_node_type* const node = nullptr)
     {
         initialize(bucket, node);
@@ -449,6 +501,90 @@ private:
 
     explicit hash_map_const_iterator(const bucket_type& bucket, qualified_node_type* const node = nullptr)
         : hash_map_const_iterator(std::addressof(bucket), node)
+    {
+    }
+
+    template <typename, typename, typename, typename>
+    friend struct hash_map;
+};
+
+template <typename BucketType>
+struct hash_map_local_iterator final : hash_map_iterator_base<typename BucketType::node_type, typename BucketType::item_value_type, BucketType, hash_map_local_iterator<BucketType>>
+{
+    using iterator_category = std::forward_iterator_tag;
+    using hash_map_iterator_category = hash_map_local_iterator_tag;
+
+    using base = hash_map_iterator_base<typename BucketType::node_type, typename BucketType::item_value_type, BucketType, hash_map_local_iterator<BucketType>>;
+
+    using base::bucket_type;
+    using base::value_type;
+    using base::qualified_node_type;
+    using base::difference_type;
+    using base::pointer;
+    using base::reference;
+
+    hash_map_local_iterator() = delete;
+    ~hash_map_local_iterator() = default;
+    hash_map_local_iterator(const hash_map_local_iterator& other) = default;
+    hash_map_local_iterator(hash_map_local_iterator&& other) noexcept = default;
+    hash_map_local_iterator& operator=(const hash_map_local_iterator& other) = default;
+    hash_map_local_iterator& operator=(hash_map_local_iterator&& other) noexcept = default;
+
+private:
+    explicit hash_map_local_iterator(bucket_type* const bucket, const hash_map_iterator_end_t&)
+    {
+        initialize_at_end(bucket);
+    }
+
+    explicit hash_map_local_iterator(bucket_type* const bucket, qualified_node_type* const node = nullptr)
+    {
+        initialize(bucket, node);
+    }
+
+    explicit hash_map_local_iterator(bucket_type& bucket, qualified_node_type* const node = nullptr)
+        : hash_map_local_iterator(std::addressof(bucket), node)
+    {
+    }
+
+    template <typename, typename, typename, typename>
+    friend struct hash_map;
+};
+
+template <typename BucketType>
+struct hash_map_const_local_iterator final : hash_map_iterator_base<const typename BucketType::node_type, const typename BucketType::item_value_type, BucketType, hash_map_const_local_iterator<BucketType>>
+{
+    using iterator_category = std::forward_iterator_tag;
+    using hash_map_iterator_category = hash_map_local_iterator_tag;
+
+    using base = hash_map_iterator_base<const typename BucketType::node_type, const typename BucketType::item_value_type, BucketType, hash_map_const_local_iterator<BucketType>>;
+
+    using base::bucket_type;
+    using base::value_type;
+    using base::qualified_node_type;
+    using base::difference_type;
+    using base::pointer;
+    using base::reference;
+
+    hash_map_const_local_iterator() = delete;
+    ~hash_map_const_local_iterator() = default;
+    hash_map_const_local_iterator(const hash_map_const_local_iterator& other) = default;
+    hash_map_const_local_iterator(hash_map_const_local_iterator&& other) noexcept = default;
+    hash_map_const_local_iterator& operator=(const hash_map_const_local_iterator& other) = default;
+    hash_map_const_local_iterator& operator=(hash_map_const_local_iterator&& other) noexcept = default;
+
+private:
+    explicit hash_map_const_local_iterator(bucket_type* const bucket, const hash_map_iterator_end_t&)
+    {
+        initialize_at_end(bucket);
+    }
+
+    explicit hash_map_const_local_iterator(const bucket_type* const bucket, qualified_node_type* const node = nullptr)
+    {
+        initialize(bucket, node);
+    }
+
+    explicit hash_map_const_local_iterator(const bucket_type& bucket, qualified_node_type* const node = nullptr)
+        : hash_map_const_local_iterator(std::addressof(bucket), node)
     {
     }
 
@@ -479,8 +615,8 @@ public:
     using difference_type = std::ptrdiff_t;
     using iterator = hash_map_iterator<bucket_type>;
     using const_iterator = hash_map_const_iterator<bucket_type>;
-    using local_iterator = hash_map_iterator<bucket_type>;
-    using const_local_iterator = hash_map_iterator<bucket_type>;
+    using local_iterator = hash_map_local_iterator<bucket_type>;
+    using const_local_iterator = hash_map_const_local_iterator<bucket_type>;
 
 private:
     using bucket_list_type = hash_map_bucket_list<bucket_type, size_type>;
@@ -530,7 +666,7 @@ public:
 
     iterator end() noexcept
     {
-        return iterator{nullptr};
+        return iterator{hash_map_iterator_end};
     }
 
     const_iterator begin() const noexcept
@@ -540,7 +676,7 @@ public:
 
     const_iterator end() const noexcept
     {
-        return const_iterator{nullptr};
+        return const_iterator{hash_map_iterator_end};
     }
 
     const_iterator cbegin() const noexcept
@@ -550,7 +686,7 @@ public:
 
     const_iterator cend() const noexcept
     {
-        return const_iterator{nullptr};
+        return const_iterator{hash_map_iterator_end};
     }
 
     template <typename... Args>
@@ -590,7 +726,10 @@ public:
     {
         iterator it = find(x);
         if (it == end())
+        {
             return node_type();
+        }
+
         return extract(it);
     }
 
@@ -709,7 +848,10 @@ public:
     {
         iterator it = find(k);
         if (it == end())
+        {
             throw std::out_of_range("at: key not found");
+        }
+
         return it->second;
     }
 
@@ -717,7 +859,10 @@ public:
     {
         const_iterator it = find(k);
         if (it == end())
+        {
             throw std::out_of_range("at: key not found");
+        }
+
         return it->second;
     }
 
@@ -745,12 +890,35 @@ public:
         return bucket_index_by_hash(hasher(k), count);
     }
 
-    local_iterator begin(size_type n);
-    local_iterator end(size_type n);
-    const_local_iterator begin(size_type n) const;
-    const_local_iterator end(size_type n) const;
-    const_local_iterator cbegin(size_type n) const;
-    const_local_iterator cend(size_type n) const;
+    local_iterator begin(size_type n)
+    {
+        return local_iterator{bucket_list_.by_index(n)};
+    }
+
+    local_iterator end(size_type n)
+    {
+        return local_iterator{bucket_list_.by_index(n), hash_map_iterator_end};
+    }
+
+    const_local_iterator begin(size_type n) const
+    {
+        return const_local_iterator{bucket_list_.by_index(n)};
+    }
+
+    const_local_iterator end(size_type n) const
+    {
+        return const_local_iterator{bucket_list_.by_index(n), hash_map_iterator_end};
+    }
+
+    const_local_iterator cbegin(size_type n) const
+    {
+        return const_local_iterator{bucket_list_.by_index(n)};
+    }
+
+    const_local_iterator cend(size_type n) const
+    {
+        return const_local_iterator{bucket_list_.by_index(n), hash_map_iterator_end};
+    }
 
     // hash policy
     float load_factor() const noexcept
@@ -845,6 +1013,7 @@ void hash_map<Key, T, Hash, Equal>::insert(InputIterator first, InputIterator la
     }
 }
 
+#if 0
 template <typename Key, typename T, typename Hash, typename Equal>
 void hash_map<Key, T, Hash, Equal>::clear() noexcept
 {
@@ -863,6 +1032,7 @@ void hash_map<Key, T, Hash, Equal>::clear() noexcept
         ptr[index].head = node;
     }
 }
+#endif
 
 template <typename Key, typename T, typename Hash, typename Equal>
 typename hash_map<Key, T, Hash, Equal>::iterator hash_map<Key, T, Hash, Equal>::find(const key_type& k)
