@@ -401,3 +401,5 @@ cmake-*
 
 /out
 /CMakeSettings.json
+*.Report.txt
+*.min.cpp

@@ -15,368 +15,7 @@
 #include <tuple>
 #include <algorithm>
 
-#ifndef DEBUG_ASSERT_HPP_INCLUDED
-#define DEBUG_ASSERT_HPP_INCLUDED
-//======================================================================//
-// Copyright (C) 2016-2018 Jonathan Müller <jonathanmueller.dev@gmail.com>
-//
-// This software is provided 'as-is', without any express or
-// implied warranty. In no event will the authors be held
-// liable for any damages arising from the use of this software.
-//
-// Permission is granted to anyone to use this software for any purpose,
-// including commercial applications, and to alter it and redistribute
-// it freely, subject to the following restrictions:
-//
-// 1. The origin of this software must not be misrepresented;
-//    you must not claim that you wrote the original software.
-//    If you use this software in a product, an acknowledgment
-//    in the product documentation would be appreciated but
-//    is not required.
-//
-// 2. Altered source versions must be plainly marked as such,
-//    and must not be misrepresented as being the original software.
-//
-// 3. This notice may not be removed or altered from any
-//    source distribution.
-//======================================================================//
-
-#include <cstdlib>
-
-#ifndef DEBUG_ASSERT_NO_STDIO
-#    include <cstdio>
-#endif
-
-#ifndef DEBUG_ASSERT_MARK_UNREACHABLE
-#    ifdef __GNUC__
-#        define DEBUG_ASSERT_MARK_UNREACHABLE __builtin_unreachable()
-#    elif defined(_MSC_VER)
-#        define DEBUG_ASSERT_MARK_UNREACHABLE __assume(0)
-#    else
-/// Hint to the compiler that a code branch is unreachable.
-/// Define it yourself prior to including the header to override it.
-/// \notes This must be usable in an expression.
-#        define DEBUG_ASSERT_MARK_UNREACHABLE
-#    endif
-#endif
-
-#ifndef DEBUG_ASSERT_FORCE_INLINE
-#    ifdef __GNUC__
-#        define DEBUG_ASSERT_FORCE_INLINE [[gnu::always_inline]] inline
-#    elif defined(_MSC_VER)
-#        define DEBUG_ASSERT_FORCE_INLINE __forceinline
-#    else
-/// Strong hint to the compiler to inline a function.
-/// Define it yourself prior to including the header to override it.
-#        define DEBUG_ASSERT_FORCE_INLINE inline
-#    endif
-#endif
-
-namespace debug_assert
-{
-    //=== source location ===//
-    /// Defines a location in the source code.
-    struct source_location
-    {
-        const char* file_name;   ///< The file name.
-        unsigned    line_number; ///< The line number.
-    };
-
-    /// Expands to the current [debug_assert::source_location]().
-#define DEBUG_ASSERT_CUR_SOURCE_LOCATION                                                           \
-    debug_assert::source_location                                                                  \
-    {                                                                                              \
-        __FILE__, static_cast<unsigned>(__LINE__)                                                  \
-    }
-
-//=== level ===//
-/// Tag type to indicate the level of an assertion.
-    template <unsigned Level>
-    struct level
-    {};
-
-    /// Helper class that sets a certain level.
-    /// Inherit from it in your module handler.
-    template <unsigned Level>
-    struct set_level
-    {
-        static const unsigned level = Level;
-    };
-
-    template <unsigned Level>
-    const unsigned set_level<Level>::level;
-
-    /// Helper class that controls whether the handler can throw or not.
-    /// Inherit from it in your module handler.
-    /// If the module does not inherit from this class, it is assumed that
-    /// the handle does not throw.
-    struct allow_exception
-    {
-        static const bool throwing_exception_is_allowed = true;
-    };
-
-    //=== handler ===//
-    /// Does not do anything to handle a failed assertion (except calling
-    /// [std::abort()]()).
-    /// Inherit from it in your module handler.
-    struct no_handler
-    {
-        /// \effects Does nothing.
-        /// \notes Can take any additional arguments.
-        template <typename... Args>
-        static void handle(const source_location&, const char*, Args&&...) noexcept
-        {}
-    };
-
-    /// The default handler that writes a message to `stderr`.
-    /// Inherit from it in your module handler.
-    struct default_handler
-    {
-        /// \effects Prints a message to `stderr`.
-        /// \notes It can optionally accept an additional message string.
-        /// \notes If `DEBUG_ASSERT_NO_STDIO` is defined, it will do nothing.
-        static void handle(const source_location& loc, const char* expression,
-            const char* message = nullptr) noexcept
-        {
-#ifndef DEBUG_ASSERT_NO_STDIO
-            if (*expression == '\0')
-            {
-                if (message)
-                    std::fprintf(stderr, "[debug assert] %s:%u: Unreachable code reached - %s.\n",
-                        loc.file_name, loc.line_number, message);
-                else
-                    std::fprintf(stderr, "[debug assert] %s:%u: Unreachable code reached.\n",
-                        loc.file_name, loc.line_number);
-            }
-            else if (message)
-                std::fprintf(stderr, "[debug assert] %s:%u: Assertion '%s' failed - %s.\n",
-                    loc.file_name, loc.line_number, expression, message);
-            else
-                std::fprintf(stderr, "[debug assert] %s:%u: Assertion '%s' failed.\n", loc.file_name,
-                    loc.line_number, expression);
-#else
-            (void)loc;
-            (void)expression;
-            (void)message;
-#endif
-        }
-    };
-
-    /// \exclude
-    namespace detail
-    {
-        //=== boilerplate ===//
-        // from http://en.cppreference.com/w/cpp/types/remove_reference
-        template <typename T>
-        struct remove_reference
-        {
-            using type = T;
-        };
-
-        template <typename T>
-        struct remove_reference<T&>
-        {
-            using type = T;
-        };
-
-        template <typename T>
-        struct remove_reference<T&&>
-        {
-            using type = T;
-        };
-
-        // from http://stackoverflow.com/a/27501759
-        template <class T>
-        T&& forward(typename remove_reference<T>::type& t)
-        {
-            return static_cast<T&&>(t);
-        }
-
-        template <class T>
-        T&& forward(typename remove_reference<T>::type&& t)
-        {
-            return static_cast<T&&>(t);
-        }
-
-        template <bool Value, typename T = void>
-        struct enable_if;
-
-        template <typename T>
-        struct enable_if<true, T>
-        {
-            using type = T;
-        };
-
-        template <typename T>
-        struct enable_if<false, T>
-        {};
-
-        //=== helper class to check if throw is allowed ===//
-        template <class Handler, typename = void>
-        struct allows_exception
-        {
-            static const bool value = false;
-        };
-
-        template <class Handler>
-        struct allows_exception<Handler,
-            typename enable_if<Handler::throwing_exception_is_allowed>::type>
-        {
-            static const bool value = Handler::throwing_exception_is_allowed;
-        };
-
-        //=== regular void fake ===//
-        struct regular_void
-        {
-            constexpr regular_void() = default;
-
-            // enable conversion to anything
-            // conversion must not actually be used
-            template <typename T>
-            constexpr operator T& () const noexcept
-            {
-                // doesn't matter how to get the T
-                return DEBUG_ASSERT_MARK_UNREACHABLE, * static_cast<T*>(nullptr);
-            }
-        };
-
-        //=== assert implementation ===//
-        // function name will be shown on constexpr assertion failure
-        template <class Handler, typename... Args>
-        regular_void debug_assertion_failed(const source_location& loc, const char* expression,
-            Args&&... args)
-        {
-            return Handler::handle(loc, expression, detail::forward<Args>(args)...), std::abort(),
-                regular_void();
-        }
-
-        // use enable if instead of tag dispatching
-        // this removes on additional function and encourage optimization
-        template <class Expr, class Handler, unsigned Level, typename... Args>
-        constexpr auto do_assert(
-            const Expr& expr, const source_location& loc, const char* expression, Handler, level<Level>,
-            Args&&... args) noexcept(!allows_exception<Handler>::value
-                || noexcept(Handler::handle(loc, expression,
-                    detail::forward<Args>(args)...))) ->
-            typename enable_if<Level <= Handler::level, regular_void>::type
-        {
-            static_assert(Level > 0, "level of an assertion must not be 0");
-            return expr() ? regular_void()
-                : debug_assertion_failed<Handler>(loc, expression,
-                    detail::forward<Args>(args)...);
-        }
-
-        template <class Expr, class Handler, unsigned Level, typename... Args>
-        DEBUG_ASSERT_FORCE_INLINE constexpr auto do_assert(const Expr&, const source_location&,
-            const char*, Handler, level<Level>,
-            Args&&...) noexcept ->
-            typename enable_if<(Level > Handler::level), regular_void>::type
-        {
-            return regular_void();
-        }
-
-            template <class Expr, class Handler, typename... Args>
-        constexpr auto do_assert(
-            const Expr& expr, const source_location& loc, const char* expression, Handler,
-            Args&&... args) noexcept(!allows_exception<Handler>::value
-                || noexcept(Handler::handle(loc, expression,
-                    detail::forward<Args>(args)...))) ->
-            typename enable_if<Handler::level != 0, regular_void>::type
-        {
-            return expr() ? regular_void()
-                : debug_assertion_failed<Handler>(loc, expression,
-                    detail::forward<Args>(args)...);
-        }
-
-        template <class Expr, class Handler, typename... Args>
-        DEBUG_ASSERT_FORCE_INLINE constexpr auto do_assert(const Expr&, const source_location&,
-            const char*, Handler, Args&&...) noexcept ->
-            typename enable_if<Handler::level == 0, regular_void>::type
-        {
-            return regular_void();
-        }
-
-        constexpr bool always_false() noexcept
-        {
-            return false;
-        }
-    } // namespace detail
-} // namespace debug_assert
-
-//=== assertion macros ===//
-#ifndef DEBUG_ASSERT_DISABLE
-/// The assertion macro.
-//
-/// Usage: `DEBUG_ASSERT(<expr>, <handler>, [<level>],
-/// [<handler-specific-args>].
-/// Where:
-/// * `<expr>` - the expression to check for, the expression `!<expr>` must be
-/// well-formed and contextually convertible to `bool`.
-/// * `<handler>` - an object of the module specific handler
-/// * `<level>` (optional, defaults to `1`) - the level of the assertion, must
-/// be an object of type [debug_assert::level<Level>]().
-/// * `<handler-specific-args>` (optional) - any additional arguments that are
-/// just forwarded to the handler function.
-///
-/// It will only check the assertion if `<level>` is less than or equal to
-/// `Handler::level`.
-/// A failed assertion will call: `Handler::handle(location, expression, args)`.
-/// `location` is the [debug_assert::source_location]() at the macro expansion,
-/// `expression` is the stringified expression and `args` are the
-/// `<handler-specific-args>` as-is.
-/// If the handler function returns, it will call [std::abort()].
-///
-/// The macro will expand to a `void` expression.
-///
-/// \notes Define `DEBUG_ASSERT_DISABLE` to completely disable this macro, it
-/// will expand to nothing.
-/// This should not be necessary, the regular version is optimized away
-/// completely.
-#    define DEBUG_ASSERT(Expr, ...)                                                                \
-        static_cast<void>(debug_assert::detail::do_assert(                                         \
-            [&]() noexcept { return Expr; }, DEBUG_ASSERT_CUR_SOURCE_LOCATION, #Expr,              \
-            __VA_ARGS__))
-
-/// Marks a branch as unreachable.
-///
-/// Usage: `DEBUG_UNREACHABLE(<handler>, [<level>], [<handler-specific-args>])`
-/// Where:
-/// * `<handler>` - an object of the module specific handler
-/// * `<level>` (optional, defaults to `1`) - the level of the assertion, must
-/// be an object of type [debug_assert::level<Level>]().
-/// * `<handler-specific-args>` (optional) - any additional arguments that are
-/// just forwarded to the handler function.
-///
-/// It will only check the assertion if `<level>` is less than or equal to
-/// `Handler::level`.
-/// A failed assertion will call: `Handler::handle(location, "", args)`.
-/// and `args` are the `<handler-specific-args>` as-is.
-/// If the handler function returns, it will call [std::abort()].
-///
-/// This macro is also usable in a constant expression,
-/// i.e. you can use it in a `constexpr` function to verify a condition like so:
-/// `cond(val) ? do_sth(val) : DEBUG_UNREACHABLE(…)`.
-/// You can't use `DEBUG_ASSERT` there.
-///
-/// The macro will expand to an expression convertible to any type,
-/// although the resulting object is invalid,
-/// which doesn't matter, as the statement is unreachable anyway.
-///
-/// \notes Define `DEBUG_ASSERT_DISABLE` to completely disable this macro, it
-/// will expand to `DEBUG_ASSERT_MARK_UNREACHABLE`.
-/// This should not be necessary, the regular version is optimized away
-/// completely.
-#    define DEBUG_UNREACHABLE(...)                                                                 \
-        debug_assert::detail::do_assert(debug_assert::detail::always_false,                        \
-                                        DEBUG_ASSERT_CUR_SOURCE_LOCATION, "", __VA_ARGS__)
-#else
-#    define DEBUG_ASSERT(Expr, ...) static_cast<void>(0)
-
-#    define DEBUG_UNREACHABLE(...)                                                                 \
-        (DEBUG_ASSERT_MARK_UNREACHABLE, debug_assert::detail::regular_void())
-#endif
-
-#endif // DEBUG_ASSERT_HPP_INCLUDED
+#include "debug_assert.hpp"
 
 struct assert_module : debug_assert::default_handler, debug_assert::set_level<1>
 {
@@ -457,12 +96,12 @@ public:
     }
 
     // 22.2.4.4, observers
-    key_type& key() const
+    [[nodiscard]] key_type& key() const
     {
         return ptr_->ref().first;
     }
 
-    mapped_type& mapped() const
+    [[nodiscard]] mapped_type& mapped() const
     {
         return ptr_->ref().second;
     }
@@ -520,12 +159,17 @@ public:
     {
     }
 
-    value_type& get() noexcept
+    explicit hash_map_node(value_type&& storage)
+        : storage_(std::forward<value_type>(storage))
+    {
+    }
+
+    [[nodiscard]] value_type& get() noexcept
     {
         return storage_;
     }
 
-    const value_type& get() const noexcept
+    [[nodiscard]] const value_type& get() const noexcept
     {
         return storage_;
     }
@@ -602,11 +246,11 @@ SizeType bucket_index_by_hash(SizeType hash, SizeType bucket_count)
     return hash % bucket_count;
 }
 
-template <typename BucketType, typename SizeType>
+template <typename BucketType>
 struct hash_map_bucket_list final
 {
     using bucket_type = BucketType;
-    using size_type = SizeType;
+    using size_type = std::size_t;
 
 #ifdef DOCTEST_CONFIG_IMPLEMENT
     static_assert(!std::is_pointer_v<bucket_type>, "hash_map_bucket_list<T*> not allowed");
@@ -870,7 +514,7 @@ public:
     using const_local_iterator = hash_map_flexible_iterator<bucket_type, true, true>;
 
 private:
-    using bucket_list_type = hash_map_bucket_list<bucket_type, size_type>;
+    using bucket_list_type = hash_map_bucket_list<bucket_type>;
     using is_nothrow_1 = std::is_nothrow_default_constructible<hasher>;
     using is_nothrow_2 = std::is_nothrow_default_constructible<key_equal>;
 
@@ -955,11 +599,7 @@ public:
         return const_iterator{hash_map_iterator_end};
     }
 
-    template <typename... Args>
-    iterator emplace(Args&&... args);
-    template <typename... Args>
-    iterator emplace_hint(const_iterator position, Args&&... args);
-    iterator insert(const value_type& obj);
+    std::pair<iterator, bool> insert(const value_type& obj);
 
     template <typename P>
     iterator insert(P&& obj)
@@ -998,9 +638,6 @@ public:
 
         return extract(it);
     }
-
-    // insert_return_type insert(node_type&& nh); // C++17
-    iterator insert(const_iterator hint, node_type&& nh); // C++17
 
     template<typename... Args>
     std::pair<iterator, bool> try_emplace(const key_type& k, Args&&... args)
@@ -1043,7 +680,6 @@ public:
         return insert_or_assign(std::move(k), std::forward<M>(obj)).first;
     }
 
-
     iterator erase(const_iterator position);
 
     iterator erase(iterator position)
@@ -1075,10 +711,6 @@ public:
     }
 
     void clear() noexcept;
-    template <typename H2, typename P2>
-    void merge(hash_map<Key, T, H2, P2>& source);
-    template <typename H2, typename P2>
-    void merge(hash_map<Key, T, H2, P2>&& source);
 
     [[nodiscard]] hasher hash_function() const
     {
@@ -1237,17 +869,30 @@ public:
         }
 
         const auto bucket_count = this->bucket_count();
+
+        if (n == bucket_count)
+        {
+            return;
+        }
+
         if (n > bucket_count)
         {
             realloc(n);
             return;
         }
 
-        // do sth clever with n < bucket_count
-        realloc(n);
+        n = std::max({ n, static_cast<size_type>(std::ceil(float(size()) / max_load_factor())) });
+
+        if (n < bucket_count)
+        {
+            realloc(n);
+        }
     }
 
-    void reserve(size_type n);
+    void reserve(size_type n)
+    {
+        rehash(static_cast<size_type>(std::ceil(n / max_load_factor())));
+    }
 
 private:
     void realloc(size_type n);
@@ -1255,7 +900,7 @@ private:
     template <bool Const,
               typename LocalIt = hash_map_flexible_iterator<bucket_type, Const, true>,
               typename GlobalIt = hash_map_flexible_iterator<bucket_type, Const, false>>
-    [[nodiscard]] GlobalIt find_within(const bucket_type& bucket, const key_type& key)
+    [[nodiscard]] GlobalIt find_within(const bucket_type& bucket, const key_type& key) const
     {
         LocalIt it_end{bucket, hash_map_iterator_end};
 
@@ -1267,17 +912,7 @@ private:
             }
         }
 
-        return end();
-    }
-
-    [[nodiscard]] auto find_within(const bucket_type& bucket, const key_type& key)
-    {
-        return find_within<false>(bucket, key);
-    }
-
-    [[nodiscard]] auto find_within(const bucket_type& bucket, const key_type& key) const
-    {
-        return find_within<true>(bucket, key);
+        return GlobalIt{ hash_map_iterator_end };
     }
 
     template<typename... Args>
@@ -1287,10 +922,64 @@ private:
 };
 
 template <typename Key, typename T, typename Hash, typename Equal>
+template <typename M>
+std::pair<typename hash_map<Key, T, Hash, Equal>::iterator, bool> hash_map<Key, T, Hash, Equal>::insert_or_assign(
+    const key_type& k, M&& obj)
+{
+    std::pair<iterator, bool> res = this->emplace_key_args(k, k, std::forward<M>(obj));
+
+    // It was already present? Assign new value.
+    if (!res.second)
+    {
+        res.first->second = std::forward<M>(obj);
+    }
+
+    return res;
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
+template <typename M>
+std::pair<typename hash_map<Key, T, Hash, Equal>::iterator, bool> hash_map<Key, T, Hash, Equal>::insert_or_assign(
+    key_type&& k, M&& obj)
+{
+    std::pair<iterator, bool> res = this->emplace_key_args(k, std::move(k), std::forward<M>(obj));
+
+    // It was already present? Assign new value.
+    if (!res.second)
+    {
+        res.first->second = std::forward<M>(obj);
+    }
+
+    return res;
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
 hash_map<Key, T, Hash, Equal>::hash_map(const size_type n, const hasher& hf, const key_equal& eql)
     : hasher_(hf), key_equal_(eql)
 {
     this->realloc(n);
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
+template <typename InputIterator>
+hash_map<Key, T, Hash, Equal>::hash_map(InputIterator f, InputIterator l, size_type n, const hasher& hf,
+    const key_equal& eql)
+    : hash_map(n, hf, eql)
+{
+    this->insert(f, l);
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
+hash_map<Key, T, Hash, Equal>::hash_map(std::initializer_list<value_type> il, size_type n, const hasher& hf,
+    const key_equal& eql)
+    : hash_map(il.begin(), il.end(), n, hf, eql)
+{
+}
+
+template <typename Key, typename T, typename Hash, typename Equal>
+std::pair<typename hash_map<Key, T, Hash, Equal>::iterator, bool> hash_map<Key, T, Hash, Equal>::insert(const value_type& obj)
+{
+    return this->emplace_key_args(obj.first, obj);
 }
 
 template <typename Key, typename T, typename Hash, typename Equal>
@@ -1343,7 +1032,7 @@ typename hash_map<Key, T, Hash, Equal>::iterator hash_map<Key, T, Hash, Equal>::
 
     auto& bucket = bucket_list_.by_hash(hash);
 
-    return find_within(bucket, k);
+    return find_within<false>(bucket, k);
 }
 
 template <typename Key, typename T, typename Hash, typename Equal>
@@ -1359,7 +1048,7 @@ typename hash_map<Key, T, Hash, Equal>::const_iterator hash_map<Key, T, Hash, Eq
 
     auto& bucket = bucket_list_.by_hash(hash);
 
-    return find_within(bucket, k);
+    return find_within<true>(bucket, k);
 }
 
 template <typename Key, typename T, typename Hash, typename Equal>
@@ -1426,7 +1115,7 @@ std::pair<typename hash_map<Key, T, Hash, Equal>::iterator, bool> hash_map<Key, 
 
     auto& bucket = bucket_list_.by_hash(hash);
     
-    iterator entry = find_within(bucket, k);
+    iterator entry = find_within<false>(bucket, k);
 
     if (entry != end())
     {
@@ -1452,7 +1141,8 @@ typename hash_map<Key, T, Hash, Equal>::node_type hash_map<Key, T, Hash, Equal>:
     local_iterator bucket_it = begin(bucket_index);
     const local_iterator bucket_it_end = end(bucket_index);
 
-    DEBUG_ASSERT(size_-- != 0, assert_module{});
+    DEBUG_ASSERT(size_ != 0, assert_module{});
+    --size_;
 
     if (key_equal_(key, bucket_it->first))
     {
@@ -1594,7 +1284,7 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
 
 TEST_CASE("map is created correctly")
 {
-    std::int64_t n = 0;
+    std::size_t n = 0;
     DOCTEST_INDEX_PARAMETERIZED_DATA(n, 1, 50);
 
     hash_map<std::uint64_t, std::uint8_t> map(n);
@@ -1671,30 +1361,93 @@ TEST_CASE("map elements are emplaced correctly")
     CHECK_EQ(map.size(), 0);
 }
 
-// This one I was too lazy to write myself. CC-BY-SA 4.0 at https://stackoverflow.com/a/50631844
-// I use this one only for static_assert's to check implementation consistency
-template <typename L, typename R>
-struct has_operator_equals_impl
+TEST_CASE("map initializer list constructor works")
 {
-    template <typename T = L, typename U = R> // template parameters here to enable SFINAE
-    static auto test(T&& t, U&& u) -> decltype(t == u, void(), std::true_type{});
-    static auto test(...) -> std::false_type;
-    using type = decltype(test(std::declval<L>(), std::declval<R>()));
+    hash_map<std::uint64_t, std::uint8_t> map { {15, 2}, {30, 5} };
+
+    CHECK_EQ(map.size(), 2);
+    CHECK_EQ(map[15], 2);
+    CHECK_EQ(map[30], 5);
+
+    map.clear();
+    CHECK_EQ(map.size(), 0);
+}
+
+TEST_CASE("map insert_or_assign works")
+{
+    hash_map<std::string, std::string> map;
+    map.insert_or_assign("a", "apple");
+    map.insert_or_assign("b", "banana");
+    map.insert_or_assign("c", "cherry");
+    map.insert_or_assign("c", "clementine");
+
+    CHECK_EQ(map.size(), 3);
+    CHECK_EQ(map["a"], "apple");
+    CHECK_EQ(map["b"], "banana");
+    CHECK_EQ(map["c"], "clementine");
+
+    CHECK_EQ(map.count("a"), 1);
+    CHECK_EQ(map.count("b"), 1);
+    CHECK_EQ(map.count("c"), 1);
+    CHECK_EQ(map.count("who"), 0);
+}
+
+struct test_no_default_constructible final
+{
+    int value;
+
+    test_no_default_constructible() = delete;
+
+    test_no_default_constructible(const int value) noexcept
+        : value(value)
+    {
+    }
+
+    ~test_no_default_constructible() = default;
+
+    test_no_default_constructible(const test_no_default_constructible& other) = default;
+    test_no_default_constructible(test_no_default_constructible&& other) noexcept = default;
+    test_no_default_constructible& operator=(const test_no_default_constructible& other) = default;
+    test_no_default_constructible& operator=(test_no_default_constructible&& other) noexcept = default;
+
+    friend bool operator==(const test_no_default_constructible& lhs, const test_no_default_constructible& rhs)
+    {
+        return lhs.value == rhs.value;
+    }
+
+    friend bool operator!=(const test_no_default_constructible& lhs, const test_no_default_constructible& rhs)
+    {
+        return !(lhs == rhs);
+    }
 };
 
-// Those are my own though.
-template <typename L, typename R>
-struct has_operator_equals
+TEST_CASE("map weird data types work")
 {
-private:
-    using type_forward = typename has_operator_equals_impl<L, R>::type;
-    using type_backward = typename has_operator_equals_impl<R, L>::type;
-public:
-    typedef std::conditional_t<type_forward::value && type_backward::value, std::true_type, std::false_type> type;
-};
+    auto hasher = [](auto& x) -> std::size_t { return x.value; };
+    hash_map<test_no_default_constructible, test_no_default_constructible, decltype(hasher)> map(4, hasher);
+    map.insert_or_assign(1, 2);
+    map.insert_or_assign(2, 5);
+    map.try_emplace(map.cbegin(), 3, 10);
+    map.try_emplace(4, 20);
 
-template <typename L, typename R>
-using has_operator_equals_t = typename has_operator_equals<L, R>::type;
+    CHECK_EQ(map.size(), 4);
+
+    CHECK(map.contains(1));
+    CHECK(map.contains(2));
+    CHECK(map.contains(3));
+    CHECK(map.contains(4));
+    CHECK(!map.contains(20));
+
+    CHECK_EQ(map.find(1)->second, 2);
+    CHECK_EQ(map.find(2)->second, 5);
+    CHECK_EQ(map.find(3)->second, 10);
+    CHECK_EQ(map.find(4)->second, 20);
+
+    CHECK_EQ(map.at(1), 2);
+    CHECK_EQ(map.at(2), 5);
+    CHECK_EQ(map.at(3), 10);
+    CHECK_EQ(map.at(4), 20);
+}
 
 template< class T, class U >
 constexpr bool has_assignment_operator_v = std::is_assignable<T, U>::value && !std::is_trivially_assignable<T, U>::value;
