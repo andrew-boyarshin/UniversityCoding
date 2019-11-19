@@ -91,12 +91,14 @@ struct value
 
     virtual std::shared_ptr<value> evaluate() = 0;
 
+protected:
     virtual std::optional<std::partial_ordering> compare(const value* other) const
     {
         return std::nullopt;
     }
 
-    static decltype(auto) compare(const value* const lhs, const value* const rhs)
+private:
+    static decltype(auto) compare_impl(const value* const lhs, const value* const rhs)
     {
         auto result = lhs->compare(rhs);
         if (result.has_value())
@@ -113,31 +115,16 @@ struct value
         return result;
     }
 
-    static bool equal(const value* const lhs, const value* const rhs)
+public:
+    static decltype(auto) compare(const value* const lhs, const value* const rhs)
     {
-        const auto result = compare(lhs, rhs);
-        return std::is_eq(result.value_or(std::partial_ordering::unordered));
-    }
-
-    friend bool operator==(const value& lhs, const value& rhs)
-    {
-        return equal(&lhs, &rhs);
-    }
-
-    friend bool operator!=(const value& lhs, const value& rhs)
-    {
-        return !(lhs == rhs);
+        const auto result = compare_impl(lhs, rhs);
+        return result.value_or(std::partial_ordering::unordered);
     }
 
     friend std::partial_ordering operator<=>(const value& lhs, const value& rhs)
     {
-        auto result = compare(&lhs, &rhs);
-        if (result.has_value())
-        {
-            return result.value();
-        }
-
-        return std::partial_ordering::unordered;
+        return compare(&lhs, &rhs);
     }
 
     template <typename T, typename... Args, std::enable_if_t<std::is_base_of_v<value, T>>* = nullptr>
@@ -147,201 +134,6 @@ struct value
         return std::shared_ptr<T>(::new T(std::forward<Args>(params)...));
     }
 };
-
-namespace operations
-{
-    template <typename T1, typename T2>
-    struct op
-    {
-    };
-
-    template <typename T>
-    struct op_with_equality_tag
-    {
-    };
-
-    template <typename T>
-    struct op_without_equality_tag
-    {
-    };
-
-    template <typename T>
-    struct op_with_comparison_tag
-    {
-    };
-
-    template <typename T>
-    struct op_without_comparison_tag
-    {
-    };
-
-    template <typename T1, typename T2, typename Derived>
-    struct op_with_equality : op<T1, T2>, op_with_equality_tag<std::add_const_t<T1>>, op_with_equality_tag<std::add_const_t<T2>>
-    {
-        static_assert(std::is_base_of_v<value, T1>);
-        using t1 = std::shared_ptr<std::add_const_t<T1>>;
-        static_assert(std::is_base_of_v<value, T2>);
-        using t2 = std::shared_ptr<std::add_const_t<T2>>;
-
-        bool not_equal(t1 lhs, t2 rhs)
-        {
-            return !Derived::equal(std::move(lhs), std::move(rhs));
-        }
-    };
-
-    template <typename T1, typename T2>
-    struct op_without_equality : op<T1, T2>, op_without_equality_tag<std::add_const_t<T1>>, op_without_equality_tag<std::add_const_t<T2>>
-    {
-        static_assert(std::is_base_of_v<value, T1>);
-        using t1 = std::shared_ptr<std::add_const_t<T1>>;
-        static_assert(std::is_base_of_v<value, T2>);
-        using t2 = std::shared_ptr<std::add_const_t<T2>>;
-
-        bool not_equal(const t1, const t2)
-        {
-            return false;
-        }
-    };
-
-    template <typename T1, typename T2, typename Derived>
-    struct op_with_comparison : op<T1, T2>, op_with_comparison_tag<std::add_const_t<T1>>, op_with_comparison_tag<std::add_const_t<T2>>
-    {
-        static_assert(std::is_base_of_v<value, T1>);
-        using t1 = std::shared_ptr<std::add_const_t<T1>>;
-        static_assert(std::is_base_of_v<value, T2>);
-        using t2 = std::shared_ptr<std::add_const_t<T2>>;
-
-        bool greater_equal(t1 lhs, t2 rhs)
-        {
-            return !Derived::less(std::move(lhs), std::move(rhs));
-        }
-
-        bool greater(t1 lhs, t2 rhs)
-        {
-            return Derived::less(std::move(rhs), std::move(lhs));
-        }
-
-        bool less_equal(t1 lhs, t2 rhs)
-        {
-            return !Derived::greater(std::move(lhs), std::move(rhs));
-        }
-    };
-
-    template <typename T1, typename T2>
-    struct op_without_comparison : op<T1, T2>, op_without_comparison_tag<std::add_const_t<T1>>, op_without_comparison_tag<std::add_const_t<T2>>
-    {
-        static_assert(std::is_base_of_v<value, T1>);
-        using t1 = std::shared_ptr<std::add_const_t<T1>>;
-        static_assert(std::is_base_of_v<value, T2>);
-        using t2 = std::shared_ptr<std::add_const_t<T2>>;
-
-        bool greater_equal(const t1, const t2)
-        {
-            return false;
-        }
-
-        bool greater(const t1, const t2)
-        {
-            return false;
-        }
-
-        bool less_equal(const t1, const t2)
-        {
-            return false;
-        }
-    };
-
-    template <typename Derived>
-    struct predicate
-    {
-        template <typename T1, typename T2, typename C1 = std::add_const_t<T1>, typename C2 = std::add_const_t<T2>, typename P1 = std::shared_ptr<T1>, typename P2 = std::shared_ptr<T2>>
-        bool greater_equal(P1 lhs, P2 rhs)
-        {
-            auto lhs_c1 = std::const_pointer_cast<C1>(lhs);
-            auto lhs_c2 = std::dynamic_pointer_cast<C2>(lhs_c1);
-            auto rhs_c2 = std::const_pointer_cast<C2>(rhs);
-            auto rhs_c1 = std::dynamic_pointer_cast<C1>(rhs_c2);
-            auto result = false;
-            if constexpr (std::is_base_of_v<op_with_comparison<T1, T2, Derived>, Derived>)
-            {
-                result = result || Derived::greater_equal(std::move(lhs), std::move(rhs));
-            }
-            if constexpr (std::is_base_of_v<op_with_comparison<T1, C2, Derived>, Derived>)
-            {
-                result = result || Derived::greater_equal(std::move(lhs), std::move(rhs_c2));
-            }
-            if constexpr (std::is_base_of_v<op_with_comparison<C1, T2, Derived>, Derived>)
-            {
-                result = result || Derived::greater_equal(std::move(lhs_c1), std::move(rhs));
-            }
-            if constexpr (std::is_base_of_v<op_with_comparison<C1, C2, Derived>, Derived>)
-            {
-                result = result || Derived::greater_equal(std::move(lhs_c1), std::move(rhs_c2));
-            }
-            if (!result && lhs_c1)
-            {
-
-            }
-            if constexpr (std::is_base_of_v<op_with_comparison_tag<C1>, Derived> && std::is_base_of_v<op_with_comparison_tag<C2>, Derived>)
-            {
-                if constexpr (std::is_base_of_v<op_with_comparison<C1, C2, Derived>, Derived>)
-                {
-                    result = result || Derived::greater_equal(std::move(lhs_c1), std::move(rhs));
-                }
-                if constexpr (std::is_base_of_v<op_with_comparison<C1, C2, Derived>, Derived>)
-                {
-                    result = result || Derived::greater_equal(std::move(lhs), std::move(rhs_c2));
-                }
-                if constexpr (std::is_base_of_v<op_with_comparison<C1, C2, Derived>, Derived>)
-                {
-                    result = result || Derived::greater_equal(std::move(lhs_c1), std::move(rhs_c2));
-                }
-            }
-            return result;
-        }
-
-        bool greater(const t1, const t2)
-        {
-            return false;
-        }
-
-        bool less_equal(const t1, const t2)
-        {
-            return false;
-        }
-    };
-}
-
-bool operator==(const std::shared_ptr<const expression>& lhs, const std::shared_ptr<const expression>& rhs)
-{
-    if (!lhs && !rhs)
-        return true;
-
-    if (lhs && !rhs || !lhs && rhs)
-        return false;
-
-    return *lhs == *rhs;
-}
-
-bool operator!=(const std::shared_ptr<const expression>& lhs, const std::shared_ptr<const expression>& rhs)
-{
-    return !(lhs == rhs);
-}
-
-bool operator==(const std::shared_ptr<expression>& lhs, const std::shared_ptr<expression>& rhs)
-{
-    return std::const_pointer_cast<const expression>(lhs) == std::const_pointer_cast<const expression>(rhs);
-}
-
-bool operator!=(const std::shared_ptr<expression>& lhs, const std::shared_ptr<expression>& rhs)
-{
-    return !(lhs == rhs);
-}
-
-bool operator!=(const expression& lhs, const expression& rhs)
-{
-    return !(lhs == rhs);
-}
 
 struct variable_late_binding final
 {
@@ -415,6 +207,16 @@ struct integer_value final : value, std::enable_shared_from_this<integer_value>
         return shared_from_this();
     }
 
+    std::optional<std::partial_ordering> compare(const ::value* other) const override
+    {
+        if (auto* other_as_int = dynamic_cast<const integer_value*>(other))
+        {
+            return value <=> other_as_int->value;
+        }
+
+        throw std::exception("Can only compare integer with integer");
+    }
+
 private:
     explicit integer_value(const int64_t value)
         : value(value)
@@ -424,9 +226,14 @@ private:
     friend struct value;
 };
 
-struct function_value : value
+struct function_value : value, std::enable_shared_from_this<function_value>
 {
     std::shared_ptr<name_lookup_context> scope;
+
+    std::shared_ptr<value> evaluate() override
+    {
+        return shared_from_this();
+    }
 
     std::shared_ptr<value> execute(std::shared_ptr<sequence_value> arguments)
     {
@@ -680,7 +487,7 @@ struct call_value final : value
     std::shared_ptr<value> evaluate() override;
 
 private:
-    call_value(variable_late_binding what, std::shared_ptr<sequence_value> sequence_value)
+    call_value(std::shared_ptr<variable_late_binding> what, std::shared_ptr<sequence_value> sequence_value)
         : what(std::move(what)),
           arguments(std::move(sequence_value))
     {
@@ -736,24 +543,6 @@ private:
 
     friend struct value;
 };
-
-namespace operations
-{
-    template <>
-    struct op<integer_value> : op_with_equality<integer_value, op<integer_value>>,
-                               op_with_comparison<integer_value, op<integer_value>>
-    {
-        bool equal(const std::shared_ptr<const integer_value>& lhs, const std::shared_ptr<const integer_value>& rhs)
-        {
-            return lhs->value == rhs->value;
-        }
-
-        bool less(const std::shared_ptr<const integer_value>& lhs, const std::shared_ptr<const integer_value>& rhs)
-        {
-            return lhs->value < rhs->value;
-        }
-    };
-}
 
 void test_suite();
 
@@ -836,6 +625,42 @@ private:
     friend struct context_base;
     friend struct variable_late_binding;
 };
+
+std::shared_ptr<value> next(const std::shared_ptr<value> source)
+{
+    if (auto it = std::dynamic_pointer_cast<sequence_iterator_value>(source))
+    {
+        return ++*it, it;
+    }
+
+    if (auto it = std::dynamic_pointer_cast<generator_value>(source))
+    {
+        return it->next();
+    }
+
+    throw std::exception("Unknown next source");
+}
+
+void bind(const std::shared_ptr<value> expression, const std::shared_ptr<value> source)
+{
+    auto expression_variable = std::dynamic_pointer_cast<variable>(expression);
+    auto expression_seq = std::dynamic_pointer_cast<sequence_value>(expression);
+    auto source_variable = std::dynamic_pointer_cast<variable>(source);
+    auto source_seq = std::dynamic_pointer_cast<sequence_value>(source);
+    if (expression_variable && source_variable)
+    {
+        expression_variable->value = source_variable->value;
+        return;
+    }
+
+    if (expression_variable && source_seq)
+    {
+        expression_variable->value = source;
+        return;
+    }
+
+    throw std::exception("Cannot bind");
+}
 
 variable_late_binding& variable_late_binding::bind(const std::shared_ptr<name_lookup_context>& context)
 {
@@ -1017,6 +842,13 @@ std::shared_ptr<value> eval(const std::shared_ptr<ast_tree_context>& ast_context
         return eval(ast_context, nodes[0]);
     }
 
+    // not found
+    auto var = (*ast_context->name_lookup)[node_name]->bind(ast_context->name_lookup).bound_variable;
+    if (var)
+    {
+        return var;
+    }
+
     DEBUG_UNREACHABLE(assert_module{});
 
     return nullptr;
@@ -1053,6 +885,7 @@ std::shared_ptr<value> peg_parser(const std::string& source)
     ast = peg::AstOptimizer(true).optimize(ast);
 
     const auto context = context_base::create<ast_tree_context>();
+    context->name_lookup->define("add")->value = value::create<add_function_value>(context->name_lookup);
     return eval(context, ast);
 }
 
@@ -1097,17 +930,25 @@ std::shared_ptr<value> call_value::evaluate()
 
 bool condition_value::evaluate_condition()
 {
-    auto left = this->left->evaluate();
-    auto right = this->right->evaluate();
-    switch (this->kind) {
+    auto&& left = this->left->evaluate().get();
+    auto&& right = this->right->evaluate().get();
+    const auto result = compare(left, right);
+    switch (this->kind)
+    {
         case condition_operator_kind::equal:
-            return left == right;
-        case condition_operator_kind::not_equal: break;
-        case condition_operator_kind::less: break;
-        case condition_operator_kind::less_equal: break;
-        case condition_operator_kind::greater: break;
-        case condition_operator_kind::greater_equal: break;
-        default: ;
+            return std::is_eq(result);
+        case condition_operator_kind::not_equal:
+            return std::is_neq(result);
+        case condition_operator_kind::less:
+            return std::is_lt(result);
+        case condition_operator_kind::less_equal:
+            return std::is_lteq(result);
+        case condition_operator_kind::greater:
+            return std::is_gt(result);
+        case condition_operator_kind::greater_equal:
+            return std::is_gteq(result);
+        default:
+            throw std::exception("Unknown comparison kind");
     }
 }
 
