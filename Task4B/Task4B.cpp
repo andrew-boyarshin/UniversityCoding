@@ -674,15 +674,10 @@ void bind(const std::shared_ptr<value> expression, const std::shared_ptr<value> 
     auto expression_seq = std::dynamic_pointer_cast<sequence_value>(expression);
     auto source_variable = std::dynamic_pointer_cast<variable>(source);
     auto source_seq = std::dynamic_pointer_cast<sequence_value>(source);
+
     if (expression_variable && source_variable)
     {
         expression_variable->value = source_variable->value;
-        return;
-    }
-
-    if (expression_variable && source_seq)
-    {
-        expression_variable->value = source;
         return;
     }
 
@@ -694,10 +689,16 @@ void bind(const std::shared_ptr<value> expression, const std::shared_ptr<value> 
         {
             for (std::size_t i = 0; i < expression_len; ++i)
             {
-                expression_seq->values[i] = source_seq->values[i];
+                ::bind(expression_seq->values[i], source_seq->values[i]);
             }
             return;
         }
+    }
+
+    if (expression_variable)
+    {
+        expression_variable->value = source;
+        return;
     }
 
     throw std::exception("Cannot bind");
@@ -807,7 +808,14 @@ std::shared_ptr<value> sequence_value::evaluate()
 
     for (auto&& item : *this)
     {
-        result.push_back(item->evaluate());
+        if (item)
+        {
+            result.push_back(item->evaluate());
+        }
+        else
+        {
+            throw std::exception("NullReference");
+        }
     }
 
     return create<sequence_value>(result);
@@ -1128,7 +1136,10 @@ void test_suite()
         "4"_test = [] {
             auto ast = peg_parser(R"((add (var A) (var B)))");
 
-            expect(throws<std::exception>([&ast]() { evaluate(ast); }));
+            expect(throws<std::exception>([&ast]()
+            {
+                evaluate(ast);
+            }));
         };
     };
 }

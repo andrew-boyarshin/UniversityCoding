@@ -24,7 +24,7 @@ export import std;
     not defined(__cpp_fold_expressions) or not defined(__cpp_deduction_guides)
 #error "[Boost].UT requires C++20 support"
 #else
-#define BOOST_UT_VERSION 1'1'0
+#define BOOST_UT_VERSION 1'1'1
 
 #if defined(BOOST_UT_FORWARD)
 namespace std {
@@ -48,6 +48,10 @@ auto operator>=(TLhs, TRhs) -> bool;
 #include <string_view>
 #include <utility>
 #include <vector>
+#if __has_include(<unistd.h>) and __has_include(<sys/wait.h>)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 #endif
 
 #if defined(__cpp_modules)
@@ -56,7 +60,7 @@ export namespace boost::ut {
 namespace boost::ut {
 #endif
 
-inline namespace v1_1_0 {
+inline namespace v1_1_1 {
 namespace utility {
 class string_view {
  public:
@@ -70,7 +74,7 @@ class string_view {
   constexpr string_view(const char (&data)[N]) : data_{data}, size_{N - 1} {}
 
   template <class T>
-  constexpr operator T() const {
+  [[nodiscard]] constexpr operator T() const {
     return T{data_, size_};
   }
 
@@ -107,16 +111,16 @@ class function<R(TArgs...)> {
 
   constexpr auto& operator=(const function&) = delete;
   constexpr auto& operator=(function&&) = delete;
-  constexpr auto operator()(TArgs... args) -> R {
+  [[nodiscard]] constexpr auto operator()(TArgs... args) -> R {
     return invoke_(data_, args...);
   }
-  constexpr auto operator()(TArgs... args) const -> R {
+  [[nodiscard]] constexpr auto operator()(TArgs... args) const -> R {
     return invoke_(data_, args...);
   }
 
  private:
   template <class T>
-  static auto invoke_impl(void* data, TArgs... args) -> R {
+  [[nodiscard]] static auto invoke_impl(void* data, TArgs... args) -> R {
     return (*static_cast<T*>(data))(args...);
   }
 
@@ -132,7 +136,8 @@ class function<R(TArgs...)> {
 #endif
 
 #if not defined(BOOST_UT_FORWARD)
-inline auto is_match(std::string_view input, std::string_view pattern) -> bool {
+[[nodiscard]] inline auto is_match(std::string_view input,
+                                   std::string_view pattern) -> bool {
   if (std::empty(pattern)) {
     return std::empty(input);
   }
@@ -159,7 +164,7 @@ inline auto is_match(std::string_view input, std::string_view pattern) -> bool {
   return is_match(input.substr(1), pattern.substr(1));
 }
 
-inline auto split(std::string_view input, std::string_view delim)
+[[nodiscard]] inline auto split(std::string_view input, std::string_view delim)
     -> std::vector<std::string_view> {
   std::vector<std::string_view> output;
   std::size_t first{};
@@ -202,7 +207,7 @@ class source_location {
 };
 
 template <class T>
-constexpr auto type_name() -> utility::string_view {
+[[nodiscard]] constexpr auto type_name() -> utility::string_view {
 #if defined(_MSC_VER) and not defined(__clang__)
   return {&__FUNCSIG__[95], sizeof(__FUNCSIG__) - 103};
 #elif defined(__clang__)
@@ -215,22 +220,22 @@ constexpr auto type_name() -> utility::string_view {
 
 namespace math {
 template <class T>
-constexpr auto abs(const T t) -> T {
+[[nodiscard]] constexpr auto abs(const T t) -> T {
   return t < T{} ? -t : t;
 }
 
 template <class T>
-constexpr auto min(const T& lhs, const T& rhs) -> const T& {
+[[nodiscard]] constexpr auto min(const T& lhs, const T& rhs) -> const T& {
   return (rhs < lhs) ? rhs : lhs;
 }
 
 template <class T, class TExp>
-constexpr auto pow(const T base, const TExp exp) -> T {
+[[nodiscard]] constexpr auto pow(const T base, const TExp exp) -> T {
   return exp ? T(base * pow(base, exp - TExp(1))) : T(1);
 }
 
 template <class T, char... Cs>
-constexpr auto num() -> T {
+[[nodiscard]] constexpr auto num() -> T {
   static_assert(
       ((Cs == '.' or Cs == '\'' or (Cs >= '0' and Cs <= '9')) and ...));
   constexpr const char cs[]{Cs...};
@@ -256,7 +261,7 @@ constexpr auto num() -> T {
 }
 
 template <class T, char... Cs>
-constexpr auto den() -> T {
+[[nodiscard]] constexpr auto den() -> T {
   constexpr const char cs[]{Cs...};
   T result{};
   auto i = 0u;
@@ -269,7 +274,7 @@ constexpr auto den() -> T {
 }
 
 template <class T, char... Cs>
-constexpr auto den_size() -> T {
+[[nodiscard]] constexpr auto den_size() -> T {
   constexpr const char cs[]{Cs...};
   T i{};
   while (cs[i++] != '.')
@@ -278,7 +283,7 @@ constexpr auto den_size() -> T {
 }
 
 template <class T, class TValue>
-constexpr auto den_size(TValue value) -> T {
+[[nodiscard]] constexpr auto den_size(TValue value) -> T {
   constexpr auto precision = TValue(1e-7);
   T result{};
   TValue tmp{};
@@ -337,7 +342,7 @@ template <>
 inline constexpr auto is_floating_point_v<long double> = true;
 
 template <class From, class To>
-constexpr auto is_convertible(int) -> decltype(To(declval<From>())) {
+constexpr auto is_convertible(int) -> decltype(bool(To(declval<From>()))) {
   return true;
 }
 template <class...>
@@ -445,9 +450,9 @@ auto operator<<(ostream& os, const utility::string_view sv) -> ostream& {
 
 #if not defined(BOOST_UT_FORWARD)
 namespace colors {
-inline auto& none(std::ostream& os) { return os << "\033[0m"; }
-inline auto& red(std::ostream& os) { return os << "\033[31m"; }
-inline auto& green(std::ostream& os) { return os << "\033[32m"; }
+[[nodiscard]] inline auto& none(std::ostream& os) { return os << "\033[0m"; }
+[[nodiscard]] inline auto& red(std::ostream& os) { return os << "\033[31m"; }
+[[nodiscard]] inline auto& green(std::ostream& os) { return os << "\033[32m"; }
 }  // namespace colors
 #endif
 
@@ -471,29 +476,28 @@ constexpr auto& operator<<(TOs& os, const T& t) {
 struct op {};
 
 template <class T>
-constexpr auto get_impl(const T& t, int) -> decltype(t.get()) {
+[[nodiscard]] constexpr auto get_impl(const T& t, int) -> decltype(t.get()) {
   return t.get();
 }
 template <class T>
-constexpr auto get_impl(const T& t, ...) -> decltype(auto) {
+[[nodiscard]] constexpr auto get_impl(const T& t, ...) -> decltype(auto) {
   return t;
 }
 template <class T>
-constexpr auto get(const T& t) {
+[[nodiscard]] constexpr auto get(const T& t) {
   return get_impl(t, 0);
 }
 
 template <class T>
 struct type_ : op {
-  constexpr auto operator==(type_<T>) -> bool { return true; }
+  [[nodiscard]] constexpr auto operator==(type_<T>) -> bool { return true; }
   template <class TOther>
-  constexpr auto operator==(type_<TOther>) -> bool {
+  [[nodiscard]] constexpr auto operator==(type_<TOther>) -> bool {
     return false;
   }
-
-  constexpr auto operator!=(type_<T>) -> bool { return true; }
+  [[nodiscard]] constexpr auto operator!=(type_<T>) -> bool { return true; }
   template <class TOther>
-  constexpr auto operator!=(type_<TOther>) -> bool {
+  [[nodiscard]] constexpr auto operator!=(type_<TOther>) -> bool {
     return true;
   }
 
@@ -507,8 +511,8 @@ template <class T, class = int>
 class value : op {
  public:
   constexpr explicit value(const T& value) : value_(value) {}
-  constexpr operator T() const { return value_; }
-  constexpr decltype(auto) get() const { return value_; }
+  [[nodiscard]] constexpr operator T() const { return value_; }
+  [[nodiscard]] constexpr decltype(auto) get() const { return value_; }
 
  private:
   T value_{};
@@ -526,8 +530,8 @@ class value<T, type_traits::requires_t<type_traits::is_floating_point_v<T>>>
 
   constexpr explicit value(const T& val)
       : value{val, T(1) / math::pow(10, math::den_size<int>(val))} {}
-  constexpr operator T() const { return value_; }
-  constexpr decltype(auto) get() const { return value_; }
+  [[nodiscard]] constexpr operator T() const { return value_; }
+  [[nodiscard]] constexpr decltype(auto) get() const { return value_; }
 
  private:
   T value_{};
@@ -538,9 +542,11 @@ class integral_constant : op {
  public:
   static constexpr auto value = N;
 
-  constexpr auto operator-() const { return integral_constant<-N>{}; }
-  constexpr operator decltype(N)() const { return N; }
-  constexpr auto get() const { return N; }
+  [[nodiscard]] constexpr auto operator-() const {
+    return integral_constant<-N>{};
+  }
+  [[nodiscard]] constexpr operator decltype(N)() const { return N; }
+  [[nodiscard]] constexpr auto get() const { return N; }
 };
 
 template <class T, auto N, auto D, auto Size, auto P = 1>
@@ -548,37 +554,37 @@ struct floating_point_constant : op {
   static constexpr auto epsilon = T(1) / math::pow(10, Size - 1);
   static constexpr auto value = T(P) * (T(N) + (T(D) / math::pow(10, Size)));
 
-  constexpr auto operator-() const {
+  [[nodiscard]] constexpr auto operator-() const {
     return floating_point_constant<T, N, D, Size, -1>{};
   }
-  constexpr operator T() const { return value; }
-  constexpr auto get() const { return value; }
+  [[nodiscard]] constexpr operator T() const { return value; }
+  [[nodiscard]] constexpr auto get() const { return value; }
 };
 
 template <class TLhs, class TRhs>
 class eq_ : op {
  public:
   constexpr eq_(const TLhs& lhs = {}, const TRhs& rhs = {})
-      : lhs_{lhs}, rhs_{rhs} {}
+      : lhs_{lhs}, rhs_{rhs}, value_{[&] {
+          using std::operator==;
+          using std::operator<;
+          if constexpr (type_traits::has_value_v<TLhs> and
+                        type_traits::has_value_v<TRhs>) {
+            return TLhs::value == TRhs::value;
+          } else if constexpr (type_traits::has_epsilon_v<TLhs> and
+                               type_traits::has_epsilon_v<TRhs>) {
+            return math::abs(get(lhs) - get(rhs)) <
+                   math::min(TLhs::epsilon, TRhs::epsilon);
+          } else if constexpr (type_traits::has_epsilon_v<TLhs>) {
+            return math::abs(get(lhs) - get(rhs)) < TLhs::epsilon;
+          } else if constexpr (type_traits::has_epsilon_v<TRhs>) {
+            return math::abs(get(lhs) - get(rhs)) < TRhs::epsilon;
+          } else {
+            return get(lhs) == get(rhs);
+          }
+        }()} {}
 
-  constexpr operator bool() const {
-    using std::operator==;
-    using std::operator<;
-    if constexpr (type_traits::has_value_v<TLhs> and
-                  type_traits::has_value_v<TRhs>) {
-      return TLhs::value == TRhs::value;
-    } else if constexpr (type_traits::has_epsilon_v<TLhs> and
-                         type_traits::has_epsilon_v<TRhs>) {
-      return math::abs(get(lhs_) - get(rhs_)) <
-             math::min(TLhs::epsilon, TRhs::epsilon);
-    } else if constexpr (type_traits::has_epsilon_v<TLhs>) {
-      return math::abs(get(lhs_) - get(rhs_)) < TLhs::epsilon;
-    } else if constexpr (type_traits::has_epsilon_v<TRhs>) {
-      return math::abs(get(lhs_) - get(rhs_)) < TRhs::epsilon;
-    } else {
-      return get(lhs_) == get(rhs_);
-    }
-  }
+  [[nodiscard]] constexpr operator bool() const { return value_; }
 
   template <class TOs>
   friend auto operator<<(TOs& os, const eq_& op) -> TOs& {
@@ -587,34 +593,35 @@ class eq_ : op {
   }
 
  private:
-  TLhs lhs_{};
-  TRhs rhs_{};
+  const TLhs lhs_{};
+  const TRhs rhs_{};
+  const bool value_{};
 };
 
 template <class TLhs, class TRhs>
 class neq_ : op {
  public:
   constexpr neq_(const TLhs& lhs = {}, const TRhs& rhs = {})
-      : lhs_{lhs}, rhs_{rhs} {}
+      : lhs_{lhs}, rhs_{rhs}, value_{[&] {
+          using std::operator!=;
+          using std::operator>;
+          if constexpr (type_traits::has_value_v<TLhs> and
+                        type_traits::has_value_v<TRhs>) {
+            return TLhs::value != TRhs::value;
+          } else if constexpr (type_traits::has_epsilon_v<TLhs> and
+                               type_traits::has_epsilon_v<TRhs>) {
+            return math::abs(get(lhs_) - get(rhs_)) >
+                   math::min(TLhs::epsilon, TRhs::epsilon);
+          } else if constexpr (type_traits::has_epsilon_v<TLhs>) {
+            return math::abs(get(lhs_) - get(rhs_)) > TLhs::epsilon;
+          } else if constexpr (type_traits::has_epsilon_v<TRhs>) {
+            return math::abs(get(lhs_) - get(rhs_)) > TRhs::epsilon;
+          } else {
+            return get(lhs_) != get(rhs_);
+          }
+        }()} {}
 
-  constexpr operator bool() const {
-    using std::operator!=;
-    using std::operator>;
-    if constexpr (type_traits::has_value_v<TLhs> and
-                  type_traits::has_value_v<TRhs>) {
-      return TLhs::value != TRhs::value;
-    } else if constexpr (type_traits::has_epsilon_v<TLhs> and
-                         type_traits::has_epsilon_v<TRhs>) {
-      return math::abs(get(lhs_) - get(rhs_)) >
-             math::min(TLhs::epsilon, TRhs::epsilon);
-    } else if constexpr (type_traits::has_epsilon_v<TLhs>) {
-      return math::abs(get(lhs_) - get(rhs_)) > TLhs::epsilon;
-    } else if constexpr (type_traits::has_epsilon_v<TRhs>) {
-      return math::abs(get(lhs_) - get(rhs_)) > TRhs::epsilon;
-    } else {
-      return get(lhs_) != get(rhs_);
-    }
-  }
+  [[nodiscard]] constexpr operator bool() const { return value_; }
 
   template <class TOs>
   friend auto operator<<(TOs& os, const neq_& op) -> TOs& {
@@ -623,25 +630,26 @@ class neq_ : op {
   }
 
  private:
-  TLhs lhs_{};
-  TRhs rhs_{};
+  const TLhs lhs_{};
+  const TRhs rhs_{};
+  const bool value_{};
 };
 
 template <class TLhs, class TRhs>
 class gt_ : op {
  public:
   constexpr gt_(const TLhs& lhs = {}, const TRhs& rhs = {})
-      : lhs_{lhs}, rhs_{rhs} {}
+      : lhs_{lhs}, rhs_{rhs}, value_{[&] {
+          using std::operator>;
+          if constexpr (type_traits::has_value_v<TLhs> and
+                        type_traits::has_value_v<TRhs>) {
+            return TLhs::value > TRhs::value;
+          } else {
+            return get(lhs_) > get(rhs_);
+          }
+        }()} {}
 
-  constexpr operator bool() const {
-    using std::operator>;
-    if constexpr (type_traits::has_value_v<TLhs> and
-                  type_traits::has_value_v<TRhs>) {
-      return TLhs::value > TRhs::value;
-    } else {
-      return get(lhs_) > get(rhs_);
-    }
-  }
+  [[nodiscard]] constexpr operator bool() const { return value_; }
 
   template <class TOs>
   friend auto operator<<(TOs& os, const gt_& op) -> TOs& {
@@ -650,25 +658,26 @@ class gt_ : op {
   }
 
  private:
-  TLhs lhs_{};
-  TRhs rhs_{};
+  const TLhs lhs_{};
+  const TRhs rhs_{};
+  const bool value_{};
 };
 
 template <class TLhs, class TRhs>
 class ge_ : op {
  public:
   constexpr ge_(const TLhs& lhs = {}, const TRhs& rhs = {})
-      : lhs_{lhs}, rhs_{rhs} {}
+      : lhs_{lhs}, rhs_{rhs}, value_{[&] {
+          using std::operator>=;
+          if constexpr (type_traits::has_value_v<TLhs> and
+                        type_traits::has_value_v<TRhs>) {
+            return TLhs::value >= TRhs::value;
+          } else {
+            return get(lhs_) >= get(rhs_);
+          }
+        }()} {}
 
-  constexpr operator bool() const {
-    using std::operator>=;
-    if constexpr (type_traits::has_value_v<TLhs> and
-                  type_traits::has_value_v<TRhs>) {
-      return TLhs::value >= TRhs::value;
-    } else {
-      return get(lhs_) >= get(rhs_);
-    }
-  }
+  [[nodiscard]] constexpr operator bool() const { return value_; }
 
   template <class TOs>
   friend auto operator<<(TOs& os, const ge_& op) -> TOs& {
@@ -677,25 +686,26 @@ class ge_ : op {
   }
 
  private:
-  TLhs lhs_{};
-  TRhs rhs_{};
+  const TLhs lhs_{};
+  const TRhs rhs_{};
+  const bool value_{};
 };
 
 template <class TLhs, class TRhs>
 class lt_ : op {
  public:
   constexpr lt_(const TLhs& lhs = {}, const TRhs& rhs = {})
-      : lhs_{lhs}, rhs_{rhs} {}
+      : lhs_{lhs}, rhs_{rhs}, value_{[&] {
+          using std::operator<;
+          if constexpr (type_traits::has_value_v<TLhs> and
+                        type_traits::has_value_v<TRhs>) {
+            return TLhs::value < TRhs::value;
+          } else {
+            return get(lhs_) < get(rhs_);
+          }
+        }()} {}
 
-  constexpr operator bool() const {
-    using std::operator<;
-    if constexpr (type_traits::has_value_v<TLhs> and
-                  type_traits::has_value_v<TRhs>) {
-      return TLhs::value < TRhs::value;
-    } else {
-      return get(lhs_) < get(rhs_);
-    }
-  }
+  [[nodiscard]] constexpr operator bool() const { return value_; }
 
   template <class TOs>
   friend auto operator<<(TOs& os, const lt_& op) -> TOs& {
@@ -704,25 +714,26 @@ class lt_ : op {
   }
 
  private:
-  TLhs lhs_{};
-  TRhs rhs_{};
+  const TLhs lhs_{};
+  const TRhs rhs_{};
+  const bool value_{};
 };
 
 template <class TLhs, class TRhs>
 class le_ : op {
  public:
   constexpr le_(const TLhs& lhs = {}, const TRhs& rhs = {})
-      : lhs_{lhs}, rhs_{rhs} {}
+      : lhs_{lhs}, rhs_{rhs}, value_{[&] {
+          using std::operator<=;
+          if constexpr (type_traits::has_value_v<TLhs> and
+                        type_traits::has_value_v<TRhs>) {
+            return TLhs::value <= TRhs::value;
+          } else {
+            return get(lhs_) <= get(rhs_);
+          }
+        }()} {}
 
-  constexpr operator bool() const {
-    using std::operator<=;
-    if constexpr (type_traits::has_value_v<TLhs> and
-                  type_traits::has_value_v<TRhs>) {
-      return TLhs::value <= TRhs::value;
-    } else {
-      return get(lhs_) <= get(rhs_);
-    }
-  }
+  [[nodiscard]] constexpr operator bool() const { return value_; }
 
   template <class TOs>
   friend auto operator<<(TOs& os, const le_& op) -> TOs& {
@@ -731,19 +742,20 @@ class le_ : op {
   }
 
  private:
-  TLhs lhs_{};
-  TRhs rhs_{};
+  const TLhs lhs_{};
+  const TRhs rhs_{};
+  const bool value_{};
 };
 
 template <class TLhs, class TRhs>
 class and_ : op {
  public:
   constexpr and_(const TLhs& lhs = {}, const TRhs& rhs = {})
-      : lhs_{lhs}, rhs_{rhs} {}
+      : lhs_{lhs},
+        rhs_{rhs},
+        value_{static_cast<bool>(lhs) and static_cast<bool>(rhs)} {}
 
-  constexpr operator bool() const {
-    return static_cast<bool>(lhs_) and static_cast<bool>(rhs_);
-  }
+  [[nodiscard]] constexpr operator bool() const { return value_; }
 
   template <class TOs>
   friend auto operator<<(TOs& os, const and_& op) -> TOs& {
@@ -752,19 +764,20 @@ class and_ : op {
   }
 
  private:
-  TLhs lhs_{};
-  TRhs rhs_{};
+  const TLhs lhs_{};
+  const TRhs rhs_{};
+  const bool value_{};
 };
 
 template <class TLhs, class TRhs>
 class or_ : op {
  public:
   constexpr or_(const TLhs& lhs = {}, const TRhs& rhs = {})
-      : lhs_{lhs}, rhs_{rhs} {}
+      : lhs_{lhs},
+        rhs_{rhs},
+        value_{static_cast<bool>(lhs) or static_cast<bool>(rhs)} {}
 
-  constexpr operator bool() const {
-    return static_cast<bool>(lhs_) or static_cast<bool>(rhs_);
-  }
+  [[nodiscard]] constexpr operator bool() const { return value_; }
 
   template <class TOs>
   friend auto operator<<(TOs& os, const or_& op) -> TOs& {
@@ -773,16 +786,18 @@ class or_ : op {
   }
 
  private:
-  TLhs lhs_{};
-  TRhs rhs_{};
+  const TLhs lhs_{};
+  const TRhs rhs_{};
+  const bool value_{};
 };
 
 template <class T>
 class not_ : op {
  public:
-  explicit constexpr not_(const T& t = {}) : t_{t} {}
+  explicit constexpr not_(const T& t = {})
+      : t_{t}, value_{not static_cast<bool>(t)} {}
 
-  constexpr operator bool() const { return not static_cast<bool>(t_); }
+  [[nodiscard]] constexpr operator bool() const { return value_; }
 
   template <class TOs>
   friend auto operator<<(TOs& os, const not_& op) -> TOs& {
@@ -791,7 +806,8 @@ class not_ : op {
   }
 
  private:
-  T t_{};
+  const T t_{};
+  const bool value_{};
 };
 }  // namespace detail
 
@@ -986,13 +1002,13 @@ class reporter {
  protected:
   template <class TOs, class TExpr>
   constexpr void out(TOs& os, const TExpr& expr) {
-    static_cast<std::ostream&>(os) << expr;
+    void(static_cast<std::ostream&>(os) << expr);
   }
 
 #if defined(BOOST_UT_FORWARD) or defined(BOOST_UT_IMPLEMENTATION)
   template <class TOs, class TExpr>
   constexpr void out(TOs& os, utility::function<TExpr>& expr) {
-    expr(reinterpret_cast<io::ostream&>(os));
+    void(expr(reinterpret_cast<io::ostream&>(os)));
   }
 #endif
 
@@ -1267,13 +1283,17 @@ struct test {
     return test(name);
   }
 
-  template <class Test, type_traits::requires_t<(sizeof(Test) > 1)> = 0>
+  template <class Test,
+            type_traits::requires_t<not type_traits::is_convertible_v<
+                Test, void (*)(utility::string_view)>> = 0>
   constexpr auto operator=(Test test)
       -> decltype(test(type_traits::declval<utility::string_view>())) {
     return test(name);
   }
 
-  template <class Test, type_traits::requires_t<(sizeof(Test) > 1)> = 0>
+  template <class Test,
+            type_traits::requires_t<
+                not type_traits::is_convertible_v<Test, void (*)()>> = 0>
   constexpr auto operator=(Test test) ->
       typename type_traits::identity<Test, decltype(test())>::type {
     on<Test>(events::test{type, name, none{}, test});
@@ -1292,7 +1312,9 @@ class test_skip {
     return test;
   }
 
-  template <class Test, type_traits::requires_t<(sizeof(Test) > 1)> = 0>
+  template <class Test,
+            type_traits::requires_t<
+                not type_traits::is_convertible_v<Test, void (*)()>> = 0>
   constexpr auto operator=(Test test) ->
       typename type_traits::identity<Test, decltype(test())>::type {
     on<Test>(events::skip{t_.type, t_.name, none{}});
@@ -1304,11 +1326,66 @@ class test_skip {
 };
 
 struct log {
+  struct next {
+    template <class TMsg>
+    auto& operator<<(const TMsg& msg) {
+      on<TMsg>(events::log{' '});
+      on<TMsg>(events::log{msg});
+      return *this;
+    }
+  };
+
   template <class TMsg>
-  auto& operator<<(const TMsg& msg) {
+  auto operator<<(const TMsg& msg) -> next {
     on<TMsg>(events::log{'\n'});
     on<TMsg>(events::log{msg});
-    return *this;
+    return next{};
+  }
+};
+
+struct that_ {
+  template <class TLhs>
+  class expr {
+   public:
+    constexpr explicit expr(const TLhs& lhs) : lhs_{lhs} {}
+
+    template <class TRhs>
+    [[nodiscard]] constexpr auto operator==(const TRhs& rhs) const {
+      return eq_{lhs_, rhs};
+    }
+
+    template <class TRhs>
+    [[nodiscard]] constexpr auto operator!=(const TRhs& rhs) const {
+      return neq_{lhs_, rhs};
+    }
+
+    template <class TRhs>
+    [[nodiscard]] constexpr auto operator>(const TRhs& rhs) const {
+      return gt_{lhs_, rhs};
+    }
+
+    template <class TRhs>
+    [[nodiscard]] constexpr auto operator>=(const TRhs& rhs) const {
+      return ge_{lhs_, rhs};
+    }
+
+    template <class TRhs>
+    [[nodiscard]] constexpr auto operator<(const TRhs& rhs) const {
+      return lt_{lhs_, rhs};
+    }
+
+    template <class TRhs>
+    [[nodiscard]] constexpr auto operator<=(const TRhs& rhs) const {
+      return le_{lhs_, rhs};
+    }
+
+   private:
+    const TLhs lhs_{};
+  };
+
+  template <class TLhs>
+  [[nodiscard]] constexpr auto operator%(const TLhs& lhs) const {
+    return expr{lhs};
   }
 };
 
@@ -1347,7 +1424,7 @@ class throws_ : op {
  public:
   constexpr explicit throws_(const TExpr& expr) : expr_{expr} {}
 
-  constexpr operator bool() const {
+  [[nodiscard]] constexpr operator bool() const {
     try {
       expr_();
     } catch (const TException&) {
@@ -1356,6 +1433,11 @@ class throws_ : op {
       return false;
     }
     return false;
+  }
+
+  template <class TOs>
+  friend auto operator<<(TOs& os, const throws_&) -> TOs& {
+    return (os << "throws<" << reflection::type_name<TException>() << ">");
   }
 
  private:
@@ -1367,13 +1449,18 @@ class throws_<TExpr, void> : op {
  public:
   constexpr explicit throws_(const TExpr& expr) : expr_{expr} {}
 
-  constexpr operator bool() const {
+  [[nodiscard]] constexpr operator bool() const {
     try {
       expr_();
     } catch (...) {
       return true;
     }
     return false;
+  }
+
+  template <class TOs>
+  friend auto operator<<(TOs& os, const throws_&) -> TOs& {
+    return (os << "throws");
   }
 
  private:
@@ -1385,13 +1472,44 @@ class nothrow_ : op {
  public:
   constexpr explicit nothrow_(const TExpr& expr) : expr_{expr} {}
 
-  constexpr operator bool() const {
+  [[nodiscard]] constexpr operator bool() const {
     try {
       expr_();
     } catch (...) {
       return false;
     }
     return true;
+  }
+
+  template <class TOs>
+  friend auto operator<<(TOs& os, const nothrow_&) -> TOs& {
+    return (os << "nothrow");
+  }
+
+ private:
+  TExpr expr_{};
+};
+#endif
+
+#if __has_include(<unistd.h>) and __has_include(<sys/wait.h>) and not defined(BOOST_UT_FORWARD)
+template <class TExpr>
+class aborts_ : op {
+ public:
+  constexpr explicit aborts_(const TExpr& expr) : expr_{expr} {}
+
+  [[nodiscard]] constexpr operator bool() const {
+    if (const auto pid = fork(); not pid) {
+      expr_();
+      exit(0);
+    }
+    auto exit_status = 0;
+    wait(&exit_status);
+    return exit_status;
+  }
+
+  template <class TOs>
+  friend auto operator<<(TOs& os, const aborts_&) -> TOs& {
+    return (os << "aborts");
   }
 
  private:
@@ -1401,71 +1519,72 @@ class nothrow_ : op {
 }  // namespace detail
 
 namespace literals {
-constexpr auto operator""_test(const char* name, decltype(sizeof("")) size) {
+[[nodiscard]] constexpr auto operator""_test(const char* name,
+                                             decltype(sizeof("")) size) {
   return detail::test{"test", utility::string_view{name, size}};
 }
 
 template <char... Cs>
-constexpr auto operator""_i() {
+[[nodiscard]] constexpr auto operator""_i() {
   return detail::integral_constant<math::num<int, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_s() {
+[[nodiscard]] constexpr auto operator""_s() {
   return detail::integral_constant<math::num<short, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_c() {
+[[nodiscard]] constexpr auto operator""_c() {
   return detail::integral_constant<math::num<char, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_l() {
+[[nodiscard]] constexpr auto operator""_l() {
   return detail::integral_constant<math::num<long, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_ll() {
+[[nodiscard]] constexpr auto operator""_ll() {
   return detail::integral_constant<math::num<long long, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_u() {
+[[nodiscard]] constexpr auto operator""_u() {
   return detail::integral_constant<math::num<unsigned, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_uc() {
+[[nodiscard]] constexpr auto operator""_uc() {
   return detail::integral_constant<math::num<unsigned char, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_us() {
+[[nodiscard]] constexpr auto operator""_us() {
   return detail::integral_constant<math::num<unsigned short, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_ul() {
+[[nodiscard]] constexpr auto operator""_ul() {
   return detail::integral_constant<math::num<unsigned long, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_f() {
+[[nodiscard]] constexpr auto operator""_f() {
   return detail::floating_point_constant<
       float, math::num<unsigned long, Cs...>(), math::den<int, Cs...>(),
       math::den_size<int, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_d() {
+[[nodiscard]] constexpr auto operator""_d() {
   return detail::floating_point_constant<
       double, math::num<unsigned long, Cs...>(), math::den<int, Cs...>(),
       math::den_size<int, Cs...>()>{};
 }
 
 template <char... Cs>
-constexpr auto operator""_ld() {
+[[nodiscard]] constexpr auto operator""_ld() {
   return detail::floating_point_constant<
       long double, math::num<unsigned long, Cs...>(), math::den<int, Cs...>(),
       math::den_size<int, Cs...>()>{};
@@ -1479,94 +1598,96 @@ constexpr auto is_op_v = __is_base_of(detail::op, T);
 
 namespace operators {
 #if defined(__cpp_lib_string_view)
-constexpr auto operator==(std::string_view lhs, std::string_view rhs) {
+[[nodiscard]] constexpr auto operator==(std::string_view lhs,
+                                        std::string_view rhs) {
   return detail::eq_{lhs, rhs};
 }
 
-constexpr auto operator!=(std::string_view lhs, std::string_view rhs) {
+[[nodiscard]] constexpr auto operator!=(std::string_view lhs,
+                                        std::string_view rhs) {
   return detail::neq_{lhs, rhs};
 }
 #endif
 
 template <class T, type_traits::requires_t<type_traits::is_container_v<T>> = 0>
-constexpr auto operator==(T&& lhs, T&& rhs) {
+[[nodiscard]] constexpr auto operator==(T&& lhs, T&& rhs) {
   return detail::eq_{static_cast<T&&>(lhs), static_cast<T&&>(rhs)};
 }
 
 template <class T, type_traits::requires_t<type_traits::is_container_v<T>> = 0>
-constexpr auto operator!=(T&& lhs, T&& rhs) {
+[[nodiscard]] constexpr auto operator!=(T&& lhs, T&& rhs) {
   return detail::neq_{static_cast<T&&>(lhs), static_cast<T&&>(rhs)};
 }
 
 template <class TLhs, class TRhs,
           type_traits::requires_t<type_traits::is_op_v<TLhs> or
                                   type_traits::is_op_v<TRhs>> = 0>
-constexpr auto operator==(const TLhs& lhs, const TRhs& rhs) {
+[[nodiscard]] constexpr auto operator==(const TLhs& lhs, const TRhs& rhs) {
   return detail::eq_{lhs, rhs};
 }
 
 template <class TLhs, class TRhs,
           type_traits::requires_t<type_traits::is_op_v<TLhs> or
                                   type_traits::is_op_v<TRhs>> = 0>
-constexpr auto operator!=(const TLhs& lhs, const TRhs& rhs) {
+[[nodiscard]] constexpr auto operator!=(const TLhs& lhs, const TRhs& rhs) {
   return detail::neq_{lhs, rhs};
 }
 
 template <class TLhs, class TRhs,
           type_traits::requires_t<type_traits::is_op_v<TLhs> or
                                   type_traits::is_op_v<TRhs>> = 0>
-constexpr auto operator>(const TLhs& lhs, const TRhs& rhs) {
+[[nodiscard]] constexpr auto operator>(const TLhs& lhs, const TRhs& rhs) {
   return detail::gt_{lhs, rhs};
 }
 
 template <class TLhs, class TRhs,
           type_traits::requires_t<type_traits::is_op_v<TLhs> or
                                   type_traits::is_op_v<TRhs>> = 0>
-constexpr auto operator>=(const TLhs& lhs, const TRhs& rhs) {
+[[nodiscard]] constexpr auto operator>=(const TLhs& lhs, const TRhs& rhs) {
   return detail::ge_{lhs, rhs};
 }
 
 template <class TLhs, class TRhs,
           type_traits::requires_t<type_traits::is_op_v<TLhs> or
                                   type_traits::is_op_v<TRhs>> = 0>
-constexpr auto operator<(const TLhs& lhs, const TRhs& rhs) {
+[[nodiscard]] constexpr auto operator<(const TLhs& lhs, const TRhs& rhs) {
   return detail::lt_{lhs, rhs};
 }
 
 template <class TLhs, class TRhs,
           type_traits::requires_t<type_traits::is_op_v<TLhs> or
                                   type_traits::is_op_v<TRhs>> = 0>
-constexpr auto operator<=(const TLhs& lhs, const TRhs& rhs) {
+[[nodiscard]] constexpr auto operator<=(const TLhs& lhs, const TRhs& rhs) {
   return detail::le_{lhs, rhs};
 }
 
 template <class TLhs, class TRhs,
           type_traits::requires_t<type_traits::is_op_v<TLhs> or
                                   type_traits::is_op_v<TRhs>> = 0>
-constexpr auto operator and(const TLhs& lhs, const TRhs& rhs) {
+[[nodiscard]] constexpr auto operator and(const TLhs& lhs, const TRhs& rhs) {
   return detail::and_{lhs, rhs};
 }
 
 template <class TLhs, class TRhs,
           type_traits::requires_t<type_traits::is_op_v<TLhs> or
                                   type_traits::is_op_v<TRhs>> = 0>
-constexpr auto operator or(const TLhs& lhs, const TRhs& rhs) {
+[[nodiscard]] constexpr auto operator or(const TLhs& lhs, const TRhs& rhs) {
   return detail::or_{lhs, rhs};
 }
 
 template <class T, type_traits::requires_t<type_traits::is_op_v<T>> = 0>
-constexpr auto operator not(const T& t) {
+[[nodiscard]] constexpr auto operator not(const T& t) {
   return detail::not_{t};
 }
 
 template <class T>
-constexpr auto operator|(const detail::skip&, const T& t) {
+[[nodiscard]] constexpr auto operator|(const detail::skip&, const T& t) {
   return detail::test_skip{t};
 }
 
 template <class F, class T,
           type_traits::requires_t<type_traits::is_container_v<T>> = 0>
-constexpr auto operator|(const F& f, const T& t) {
+[[nodiscard]] constexpr auto operator|(const F& f, const T& t) {
   return [f, t](auto name) {
     for (const auto& arg : t) {
       detail::on<F>(events::test{"test", name, arg, f});
@@ -1577,7 +1698,7 @@ constexpr auto operator|(const F& f, const T& t) {
 template <
     class F, template <class...> class T, class... Ts,
     type_traits::requires_t<not type_traits::is_container_v<T<Ts...>>> = 0>
-constexpr auto operator|(const F& f, const T<Ts...>& t) {
+[[nodiscard]] constexpr auto operator|(const F& f, const T<Ts...>& t) {
   return [f, t](auto name) {
     apply(
         [f, name](const auto&... args) {
@@ -1607,18 +1728,25 @@ constexpr auto constant = Constant;
 
 #if defined(__cpp_exceptions)
 template <class TException, class TExpr>
-constexpr auto throws(const TExpr& expr) {
+[[nodiscard]] constexpr auto throws(const TExpr& expr) {
   return detail::throws_<TExpr, TException>{expr};
 }
 
 template <class TExpr>
-constexpr auto throws(const TExpr& expr) {
+[[nodiscard]] constexpr auto throws(const TExpr& expr) {
   return detail::throws_<TExpr>{expr};
 }
 
 template <class TExpr>
-constexpr auto nothrow(const TExpr& expr) {
+[[nodiscard]] constexpr auto nothrow(const TExpr& expr) {
   return detail::nothrow_{expr};
+}
+#endif
+
+#if __has_include(<unistd.h>) and __has_include(<sys/wait.h>) and not defined(BOOST_UT_FORWARD)
+template <class TExpr>
+[[nodiscard]] constexpr auto aborts(const TExpr& expr) {
+  return detail::aborts_{expr};
 }
 #endif
 
@@ -1653,6 +1781,7 @@ struct suite {
 [[maybe_unused]] constexpr auto false_b = detail::integral_constant<false>{};
 
 [[maybe_unused]] inline auto log = detail::log{};
+[[maybe_unused]] inline auto that = detail::that_{};
 [[maybe_unused]] constexpr auto skip = detail::skip{};
 [[maybe_unused]] constexpr auto given = [](utility::string_view name) {
   return detail::test{"given", name};
@@ -1665,6 +1794,31 @@ struct suite {
 };
 template <class T>
 [[maybe_unused]] constexpr auto type = detail::type_<T>();
+
+template <class TLhs, class TRhs>
+[[nodiscard]] constexpr auto eq(const TLhs& lhs, const TRhs& rhs) {
+  return detail::eq_{lhs, rhs};
+}
+template <class TLhs, class TRhs>
+[[nodiscard]] constexpr auto neq(const TLhs& lhs, const TRhs& rhs) {
+  return detail::neq_{lhs, rhs};
+}
+template <class TLhs, class TRhs>
+[[nodiscard]] constexpr auto gt(const TLhs& lhs, const TRhs& rhs) {
+  return detail::gt_{lhs, rhs};
+}
+template <class TLhs, class TRhs>
+[[nodiscard]] constexpr auto ge(const TLhs& lhs, const TRhs& rhs) {
+  return detail::ge_{lhs, rhs};
+}
+template <class TLhs, class TRhs>
+[[nodiscard]] constexpr auto lt(const TLhs& lhs, const TRhs& rhs) {
+  return detail::lt_{lhs, rhs};
+}
+template <class TLhs, class TRhs>
+[[nodiscard]] constexpr auto le(const TLhs& lhs, const TRhs& rhs) {
+  return detail::le_{lhs, rhs};
+}
 
 using literals::operator""_test;
 using literals::operator""_i;
@@ -1689,6 +1843,6 @@ using operators::operator and;
 using operators::operator or;
 using operators::operator not;
 using operators::operator|;
-}  // namespace v1_1_0
+}  // namespace v1_1_1
 }  // namespace boost::ut
 #endif
