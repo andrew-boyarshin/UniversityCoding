@@ -31,6 +31,27 @@ std::string slurp(std::ifstream & in) {
     return sstr.str();
 }
 
+template <typename T>
+using type_decay_basic_t = std::remove_cv_t<std::remove_pointer_t<std::remove_cv_t<std::remove_reference_t<T>>>>;
+
+template <typename T>
+struct type_decay_ptr
+{
+    using type = T;
+};
+
+template <typename T>
+struct type_decay_ptr<std::shared_ptr<T>>
+{
+    using type = T;
+};
+
+template <typename T>
+using type_decay_ptr_t = typename type_decay_ptr<T>::type;
+
+template <typename T>
+using type_decay_t = type_decay_basic_t<type_decay_ptr_t<type_decay_basic_t<std::remove_cv_t<T>>>>;
+
 constexpr char grammar[] =
     R"(
 expression <- _ (val / var / add / if / let / function / call) _
@@ -64,12 +85,17 @@ enum class condition_operator_kind
 template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 template<class... Ts> overloaded(Ts...)->overloaded<Ts...>;
 
+class format_context;
+
 struct value;
 struct integer_value;
 struct function_value;
 struct generator_value;
 struct sequence_value;
+
+template <bool Const>
 struct sequence_iterator_value;
+
 struct condition_value;
 struct call_value;
 struct variable;
@@ -82,8 +108,16 @@ struct sequence_iterator_end_t
 
 const sequence_iterator_end_t sequence_iterator_end;
 
+struct format_raise_precedence_t
+{
+    explicit format_raise_precedence_t() = default;
+};
+
+const format_raise_precedence_t format_raise_precedence;
+
 std::shared_ptr<value> next(std::shared_ptr<value> source);
 std::optional<std::size_t> len(std::shared_ptr<value> source);
+std::optional<std::size_t> len(std::shared_ptr<const value> source);
 void bind(std::shared_ptr<value> expression, std::shared_ptr<value> source);
 
 struct value
@@ -91,9 +125,10 @@ struct value
     virtual ~value() = default;
 
     virtual std::shared_ptr<value> evaluate() = 0;
+    virtual format_context& format(format_context& output) const = 0;
 
 protected:
-    virtual std::optional<std::partial_ordering> compare(const value* other) const
+    virtual std::optional<std::partial_ordering> compare(const value*) const
     {
         return std::nullopt;
     }
@@ -134,6 +169,127 @@ public:
         // ReSharper disable once CppSmartPointerVsMakeFunction
         return std::shared_ptr<T>(::new T(std::forward<Args>(params)...));
     }
+};
+
+class format_context
+{
+    std::ostream* stream_;
+    bool implicit_scopes_ = false;
+public:
+    class scope;
+private:
+    scope* current_scope_ = nullptr;
+public:
+    explicit format_context(std::ostream& stream)
+        : stream_(&stream)
+    {
+    }
+
+    format_context& operator<<(const value& obj)
+    {
+        return obj.format(*this);
+    }
+
+    template <typename T, std::enable_if_t<std::is_base_of_v<value, type_decay_t<T>>>* = nullptr>
+    format_context& operator<<(const std::shared_ptr<T>& obj)
+    {
+        return obj->format(*this);
+    }
+
+    /**
+     * Should we assume there is defined operator precedence and there is no need to explicitly define the order of operations?
+     * true - omit parentheses when not necessary
+     * false - always print all parentheses
+     */
+    bool implicit_scopes() const
+    {
+        return implicit_scopes_;
+    }
+
+    void set_implicit_scopes(const bool implicit_scopes)
+    {
+        implicit_scopes_ = implicit_scopes;
+    }
+
+    scope* current_scope() const
+    {
+        return current_scope_;
+    }
+
+    template <typename T, std::enable_if_t<!std::is_base_of_v<value, type_decay_t<T>>> * = nullptr>
+    format_context& operator<<(const T& obj)
+    {
+        *stream_ << obj;
+        return *this;
+    }
+
+    format_context& operator<<(const format_raise_precedence_t&)
+    {
+        current_scope()->set_precedence(current_scope()->precedence() - 1);
+        return *this;
+    }
+
+    class scope final
+    {
+        format_context* const context_;
+        scope* const parent_;
+        std::int16_t precedence_;
+        bool const wrap_in_brackets_;
+    public:
+        scope(format_context& context, std::int16_t precedence)
+            : context_(&context), parent_(context.current_scope()), precedence_(precedence),
+            wrap_in_brackets_(!context.implicit_scopes() || (parent_ ? parent_->precedence_ < precedence : false))
+        {
+            context.current_scope_ = this;
+
+            if (wrap_in_brackets_)
+            {
+                context << '(';
+            }
+        }
+
+        ~scope()
+        {
+            if (wrap_in_brackets_)
+            {
+                try
+                {
+                    *context_ << ')';
+                }
+                catch (...)
+                {
+                    // Yay, possible I/O exception doesn't escape destructor!
+                }
+            }
+
+            context_->current_scope_ = parent_;
+        }
+
+        scope* parent() const
+        {
+            return parent_;
+        }
+
+        std::int16_t precedence() const
+        {
+            return precedence_;
+        }
+
+        void set_precedence(const std::int16_t precedence)
+        {
+            precedence_ = precedence;
+        }
+
+        bool wrap_in_brackets() const
+        {
+            return wrap_in_brackets_;
+        }
+
+        scope(const scope& other) = delete;
+        scope(scope&& other) noexcept = delete;
+        scope& operator=(const scope& other) = delete;
+        scope& operator=(scope&& other) noexcept = delete;
+    };
 };
 
 struct variable_late_binding final
@@ -205,6 +361,11 @@ struct integer_value final : value, std::enable_shared_from_this<integer_value>
     integer_value& operator=(const integer_value& other) = default;
     integer_value& operator=(integer_value&& other) noexcept = default;
 
+    format_context& format(format_context& output) const override
+    {
+        return output << "(val " << value << ")";
+    }
+
     std::shared_ptr<::value> evaluate() override
     {
         return shared_from_this();
@@ -265,6 +426,11 @@ struct add_function_value final : native_function_value
 {
     std::shared_ptr<value> execute_impl(std::shared_ptr<sequence_value> arguments) override;
 
+    format_context& format(format_context& output) const override
+    {
+        throw std::exception("Shouldn't be formatted");
+    }
+
 private:
     explicit add_function_value(std::shared_ptr<name_lookup_context> scope)
         : native_function_value(std::move(scope))
@@ -280,6 +446,11 @@ struct managed_function_value final : function_value
     std::shared_ptr<value> body;
 
     std::shared_ptr<value> execute_impl(std::shared_ptr<sequence_value> arguments) override;
+
+    format_context& format(format_context& output) const override
+    {
+        return output << "(function " << argument << " " << body << ")";
+    }
 
 private:
     managed_function_value(std::shared_ptr<value> argument, std::shared_ptr<name_lookup_context> scope,
@@ -335,25 +506,30 @@ struct sequence_value final : value, std::enable_shared_from_this<sequence_value
     using value_type = std::shared_ptr<value>;
     using reference = value_type&;
     using const_reference = const value_type&;
-    using const_iterator = sequence_iterator_value;
-    using iterator = const_iterator;
+    using const_iterator = sequence_iterator_value<true>;
+    using iterator = sequence_iterator_value<false>;
     using difference_type = std::ptrdiff_t;
     using size_type = std::size_t;
 
     std::deque<value_type> values;
     std::shared_ptr<generator_value> generator;
 
-    const_iterator begin();
-    const_iterator end();
+    iterator begin();
+    iterator end();
 
-    const_iterator cbegin();
-    const_iterator cend();
+    const_iterator begin() const;
+    const_iterator end() const;
+
+    const_iterator cbegin() const;
+    const_iterator cend() const;
 
     size_type size();
 
     std::shared_ptr<value> evaluate() override;
 
     void drain_generator();
+
+    format_context& format(format_context& output) const override;
 
 private:
     explicit sequence_value(std::shared_ptr<generator_value> generator_value)
@@ -371,26 +547,34 @@ private:
     friend struct value;
 };
 
-struct sequence_iterator_value final : value, std::enable_shared_from_this<sequence_iterator_value>
+template <bool Const>
+struct sequence_iterator_value final : value, std::enable_shared_from_this<sequence_iterator_value<Const>>
 {
-    using value_type = std::shared_ptr<value>;
+    using value_type_const = std::conditional_t<Const, const value, value>;
+    using value_type = std::shared_ptr<value_type_const>;
     using reference = value_type&;
     using pointer = value_type*;
     using const_reference = const value_type&;
     using difference_type = std::ptrdiff_t;
     using iterator_category = std::bidirectional_iterator_tag;
 
-    std::shared_ptr<sequence_value> sequence;
+    std::variant<std::shared_ptr<const sequence_value>, std::shared_ptr<sequence_value>> sequence;
     std::size_t index;
     bool end;
 
-    decltype(auto) operator*()
+    format_context& format(format_context& output) const override
+    {
+        DEBUG_ASSERT(!end, assert_module{});
+        return get()->format(output);
+    }
+
+    decltype(auto) operator*() const
     {
         DEBUG_ASSERT(!end, assert_module{});
         return get();
     }
 
-    decltype(auto) operator->()
+    decltype(auto) operator->() const
     {
         DEBUG_ASSERT(!end, assert_module{});
         return get().operator->();
@@ -426,17 +610,6 @@ struct sequence_iterator_value final : value, std::enable_shared_from_this<seque
         return ip;
     }
 
-    friend bool operator==(const sequence_iterator_value& lhs, const sequence_iterator_value& rhs)
-    {
-        return lhs.sequence == rhs.sequence
-            && (lhs.index == rhs.index || (lhs.end && rhs.end));
-    }
-
-    friend bool operator!=(const sequence_iterator_value& lhs, const sequence_iterator_value& rhs)
-    {
-        return !(lhs == rhs);
-    }
-
     std::shared_ptr<value> evaluate() override
     {
         return shared_from_this();
@@ -447,7 +620,18 @@ private:
         : sequence(std::move(sequence_value)), index(0u), end(false)
     {
     }
+
+    explicit sequence_iterator_value(std::shared_ptr<const sequence_value> sequence_value)
+        : sequence(std::move(sequence_value)), index(0u), end(false)
+    {
+    }
+
     explicit sequence_iterator_value(std::shared_ptr<sequence_value> sequence_value, sequence_iterator_end_t)
+        : sequence(std::move(sequence_value)), index(std::numeric_limits<decltype(index)>::max()), end(true)
+    {
+    }
+
+    explicit sequence_iterator_value(std::shared_ptr<const sequence_value> sequence_value, sequence_iterator_end_t)
         : sequence(std::move(sequence_value)), index(std::numeric_limits<decltype(index)>::max()), end(true)
     {
     }
@@ -456,34 +640,83 @@ private:
     {
         DEBUG_ASSERT(!end, assert_module{});
 
-        auto&& generator = sequence->generator;
-        if (generator)
-        {
-            sequence->values.push_back(generator->next());
-        }
+        ::std::visit(
+            overloaded
+            {
+                [](const std::shared_ptr<const sequence_value>& ptr)
+                {
+                    auto&& generator = ptr->generator;
+                    if (generator)
+                    {
+                        throw std::exception("Const generation forbidden");
+                    }
+                },
+                [](const std::shared_ptr<sequence_value>& ptr)
+                {
+                    auto&& generator = ptr->generator;
+                    if (generator)
+                    {
+                        ptr->values.push_back(generator->next());
+                    }
+                }
+            },
+            sequence
+        );
     }
 
     void update_end_state()
     {
-        auto&& values = sequence->values;
-        if (!end && index >= values.size())
+        if (!end && index >= std::visit(
+            [](auto&& ptr)
+            {
+                return ptr->values;
+            },
+            sequence
+        ).size())
         {
             generate_next();
         }
 
-        end = index >= values.size();
+        end = index >= std::visit(
+            [](auto&& ptr)
+            {
+                return ptr->values;
+            },
+            sequence
+        ).size();
     }
 
-    [[nodiscard]] std::shared_ptr<value> get()
+    [[nodiscard]] std::shared_ptr<value> get() const
     {
         DEBUG_ASSERT(!end, assert_module{});
 
-        return sequence->values[index];
+        return
+            std::visit(
+                [](auto&& ptr)
+                {
+                    return ptr->values;
+                },
+                sequence
+            )
+            [index];
     }
 
     friend struct value;
     friend struct sequence_value;
 };
+
+template <bool Const1, bool Const2>
+bool operator==(const sequence_iterator_value<Const1>& lhs, const sequence_iterator_value<Const2>& rhs)
+{
+    return lhs.sequence == rhs.sequence
+        && (lhs.index == rhs.index || (lhs.end && rhs.end));
+}
+
+template <bool Const1, bool Const2>
+bool operator!=(const sequence_iterator_value<Const1>& lhs, const sequence_iterator_value<Const2>& rhs)
+{
+    return !(lhs == rhs);
+}
 
 struct call_value final : value
 {
@@ -491,6 +724,11 @@ struct call_value final : value
     std::shared_ptr<sequence_value> arguments;
 
     std::shared_ptr<value> evaluate() override;
+
+    format_context& format(format_context& output) const override
+    {
+        return output << "(call " << what << " " << arguments << ")";
+    }
 
 private:
     call_value(std::shared_ptr<value> what, std::shared_ptr<sequence_value> sequence_value)
@@ -517,6 +755,11 @@ struct condition_value final : value
         return evaluate_condition() ? suite_true->evaluate() : suite_false->evaluate();
     }
 
+    format_context& format(format_context& output) const override
+    {
+        return output << "(if " << left << " " << right << " " << suite_true << " " << suite_false << ")";
+    }
+
 private:
     condition_value(std::shared_ptr<value> left, const condition_operator_kind kind, std::shared_ptr<value> right,
         std::shared_ptr<value> suite_true, std::shared_ptr<value> suite_false)
@@ -539,6 +782,11 @@ struct variable final : value
     std::shared_ptr<::value> evaluate() override
     {
         return value->evaluate();
+    }
+
+    format_context& format(format_context& output) const override
+    {
+        return output << "(var " << name << ")";
     }
 
 private:
@@ -634,7 +882,12 @@ private:
 
 std::shared_ptr<value> next(const std::shared_ptr<value> source)
 {
-    if (auto it = std::dynamic_pointer_cast<sequence_iterator_value>(source))
+    if (auto it = std::dynamic_pointer_cast<sequence_iterator_value<true>>(source))
+    {
+        return ++*it, it;
+    }
+
+    if (auto it = std::dynamic_pointer_cast<sequence_iterator_value<false>>(source))
     {
         return ++*it, it;
     }
@@ -647,21 +900,84 @@ std::shared_ptr<value> next(const std::shared_ptr<value> source)
     throw std::exception("Unknown next source");
 }
 
+auto len_iterator()
+{
+    return overloaded
+    {
+        [](const std::shared_ptr<const sequence_value>& ptr)
+        {
+            return ::len(std::static_pointer_cast<const value>(ptr));
+        },
+        [](const std::shared_ptr<sequence_value>& ptr)
+        {
+            return ::len(std::static_pointer_cast<value>(ptr));
+        }
+    };
+}
+
 std::optional<std::size_t> len(std::shared_ptr<value> source)
 {
-    if (const auto it = std::dynamic_pointer_cast<sequence_iterator_value>(source))
+    if (const auto it = std::dynamic_pointer_cast<sequence_iterator_value<true>>(source))
     {
-        return len(it->sequence);
+        return std::visit(
+            len_iterator(),
+            it->sequence
+        );
+    }
+
+    if (const auto it = std::dynamic_pointer_cast<sequence_iterator_value<false>>(source))
+    {
+        return std::visit(
+            len_iterator(),
+            it->sequence
+        );
     }
 
     if (const auto it = std::dynamic_pointer_cast<generator_value>(source))
     {
-        return len(value::create<sequence_value>(it));
+        const auto seq = value::create<sequence_value>(it);
+        return len(std::static_pointer_cast<value>(seq));
     }
 
     if (const auto it = std::dynamic_pointer_cast<sequence_value>(source))
     {
         it->drain_generator();
+        return it->values.size();
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::size_t> len(std::shared_ptr<const value> source)
+{
+    if (const auto it = std::dynamic_pointer_cast<const sequence_iterator_value<true>>(source))
+    {
+        return std::visit(
+            len_iterator(),
+            it->sequence
+        );
+    }
+
+    if (const auto it = std::dynamic_pointer_cast<const sequence_iterator_value<false>>(source))
+    {
+        return std::visit(
+            len_iterator(),
+            it->sequence
+        );
+    }
+
+    if (const auto it = std::dynamic_pointer_cast<const generator_value>(source))
+    {
+        const auto seq = value::create<sequence_value>(std::const_pointer_cast<generator_value>(it));
+        return len(std::static_pointer_cast<value>(seq));
+    }
+
+    if (const auto it = std::dynamic_pointer_cast<const sequence_value>(source))
+    {
+        if (it->generator)
+        {
+            throw std::exception("Const sequence with generator");
+        }
         return it->values.size();
     }
 
@@ -777,22 +1093,32 @@ std::shared_ptr<value> generator_value::next()
 static_assert(std::is_same_v<std::iterator_traits<sequence_value::const_iterator>::difference_type, std::ptrdiff_t>);
 static_assert(std::is_same_v<std::iterator_traits<sequence_value::const_iterator>::iterator_category, std::bidirectional_iterator_tag>);
 
-sequence_value::const_iterator sequence_value::begin()
+sequence_value::iterator sequence_value::begin()
+{
+    return iterator(shared_from_this());
+}
+
+sequence_value::iterator sequence_value::end()
+{
+    return iterator(shared_from_this(), sequence_iterator_end);
+}
+
+sequence_value::const_iterator sequence_value::begin() const
 {
     return cbegin();
 }
 
-sequence_value::const_iterator sequence_value::end()
+sequence_value::const_iterator sequence_value::end() const
 {
     return cend();
 }
 
-sequence_value::const_iterator sequence_value::cbegin()
+sequence_value::const_iterator sequence_value::cbegin() const
 {
     return const_iterator(shared_from_this());
 }
 
-sequence_value::const_iterator sequence_value::cend()
+sequence_value::const_iterator sequence_value::cend() const
 {
     return const_iterator(shared_from_this(), sequence_iterator_end);
 }
@@ -830,6 +1156,17 @@ void sequence_value::drain_generator()
     {
         values.push_back(var);
     }
+}
+
+format_context& sequence_value::format(format_context& output) const
+{
+    std::launder(const_cast<sequence_value*>(this))->drain_generator();
+    for (auto&& value : *this)
+    {
+        output << value;
+    }
+
+    return output;
 }
 
 struct ast_tree_context final : context_base
@@ -1007,6 +1344,20 @@ std::optional<int64_t> evaluate_to_number(const std::shared_ptr<value>& ast)
     return std::nullopt;
 }
 
+std::string str(std::shared_ptr<value> const& expression, bool implicit_scopes = false)
+{
+    if (!expression)
+        return "nullptr";
+
+    std::ostringstream buffer;
+
+    format_context context(buffer);
+    context.set_implicit_scopes(implicit_scopes);
+    expression->format(context);
+
+    return buffer.str();
+}
+
 std::shared_ptr<value> peg_parser(const std::string& source)
 {
     peg::parser parser;
@@ -1040,10 +1391,9 @@ int main() // NOLINT(bugprone-exception-escape)
 
     try
     {
-        auto ast = peg_parser(source);
-
-        auto result = evaluate_to_number(ast);
-        fout << "(val " << result.value() << ")" << std::endl;
+        const auto ast = peg_parser(source);
+        const auto result = evaluate(ast);
+        fout << str(result) << std::endl;
     }
     catch (...)
     {
@@ -1111,6 +1461,10 @@ void test_suite()
                                                   (var K))))");
 
             expect(evaluate_to_number(ast).value() == 15_ll);
+
+            const auto eval = evaluate(ast);
+
+            expect(eq(str(eval), std::string("(val 15)")));
         };
         "2"_test = [] {
             auto ast = peg_parser(R"((let A = (val 20) in
@@ -1133,6 +1487,10 @@ void test_suite()
                                            ))");
 
             expect(evaluate_to_number(ast).value() == 31_ll);
+
+            const auto eval = evaluate(ast);
+
+            expect(eq(str(eval), std::string("(val 31)")));
         };
         "3"_test = [] {
             auto ast = peg_parser(R"((let F = (function arg (add (var arg) (val 1))) in
@@ -1140,6 +1498,10 @@ void test_suite()
                                                   (call (var F) (var V)))))");
 
             expect(evaluate_to_number(ast).value() == 0_ll);
+
+            const auto eval = evaluate(ast);
+
+            expect(eq(str(eval), std::string("(val 0)")));
         };
         "4"_test = [] {
             auto ast = peg_parser(R"((add (var A) (var B)))");
