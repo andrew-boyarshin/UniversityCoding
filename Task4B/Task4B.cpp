@@ -1038,9 +1038,17 @@ int main() // NOLINT(bugprone-exception-escape)
 
     std::ofstream fout("output.txt");
 
-    auto ast = peg_parser(source);
+    try
+    {
+        auto ast = peg_parser(source);
 
-    fout << "(val 0)" << std::endl;
+        auto result = evaluate_to_number(ast);
+        fout << "(val " << result.value() << ")" << std::endl;
+    }
+    catch (...)
+    {
+        fout << "ERROR" << std::endl;
+    }
 
     return 0;
 }
@@ -1140,6 +1148,20 @@ void test_suite()
             {
                 evaluate(ast);
             }));
+        };
+    };
+
+    "extensions"_test = [] {
+        "1"_test = [] {
+            auto ast = peg_parser(R"((let F = (function arg (add (var arg) (val 1))) in
+                                                          (var F)))");
+
+            auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+            auto evaluated_fun = std::dynamic_pointer_cast<function_value>(evaluated);
+            expect(static_cast<bool>(evaluated_fun) == true_b);
+
+            expect(evaluate_to_number(ast).has_value() == false_b);
         };
     };
 }
