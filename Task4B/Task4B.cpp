@@ -163,8 +163,10 @@ struct format_set_precedence final
 };
 
 std::shared_ptr<value> next(std::shared_ptr<value> source);
-std::optional<std::size_t> len(std::shared_ptr<value> source);
-std::optional<std::size_t> len(std::shared_ptr<const value> source);
+
+template <typename T>
+std::optional<std::size_t> len(T&& source);
+
 void bind(std::shared_ptr<value> expression, std::shared_ptr<value> source);
 
 struct value
@@ -221,8 +223,21 @@ public:
 class format_context
 {
     std::ostream* stream_;
+    bool force_explicit_call_;
+
 public:
+    bool force_explicit_call() const
+    {
+        return force_explicit_call_;
+    }
+
+    void set_force_explicit_call(const bool force_explicit_call)
+    {
+        force_explicit_call_ = force_explicit_call;
+    }
+
     class scope;
+
 private:
     scope* current_scope_ = nullptr;
 
@@ -253,7 +268,8 @@ public:
     format_context& operator<<(T&& obj)
     {
         using obj_t = decltype(obj);
-        if constexpr (std::is_base_of_v<value, type_decay_t<obj_t>>)
+        using obj_decay_t = type_decay_t<obj_t>;
+        if constexpr (std::is_base_of_v<value, obj_decay_t>)
         {
             static_assert(!std::is_pointer_v<obj_t>);
             if constexpr (is_smart_pointer_v<std::remove_cvref_t<obj_t>>)
@@ -266,13 +282,17 @@ public:
                 return obj.format(*this);
             }
         }
-        else if constexpr (std::is_base_of_v<format_raise_precedence, type_decay_t<obj_t>>)
+        else if constexpr (std::is_same_v<format_raise_precedence, obj_decay_t>)
         {
             raise_precedence_impl(obj);
         }
-        else if constexpr (std::is_base_of_v<format_set_precedence, type_decay_t<obj_t>>)
+        else if constexpr (std::is_same_v<format_set_precedence, obj_decay_t>)
         {
             set_precedence_impl(obj);
+        }
+        else if constexpr (std::is_same_v<format_context, obj_decay_t>)
+        {
+            DEBUG_ASSERT(std::addressof(obj) == this, assert_module{});
         }
         else
         {
@@ -843,6 +863,16 @@ bool operator!=(const sequence_iterator_value<Const1>& lhs, const sequence_itera
     return !(lhs == rhs);
 }
 
+template <typename T>
+decltype(auto) format_packed(format_context& output, T&& value)
+{
+    DEBUG_ASSERT(!output.parameter_pack(), assert_module{});
+    format_context::scope scope(output);
+    scope.set_parameter_pack(true);
+
+    return output << std::forward<decltype(value)>(value);
+}
+
 struct call_value final : value
 {
     std::shared_ptr<value> what;
@@ -852,7 +882,12 @@ struct call_value final : value
 
     format_context& format(format_context& output) const override
     {
-        return output << "(call " << what << " " << arguments << ")";
+        output << '(';
+
+        if (output.force_explicit_call() && len(arguments) == 1)
+            output << "call ";
+
+        return output << format_packed(output, what) << ' ' << arguments << ')';
     }
 
 private:
@@ -1043,42 +1078,24 @@ auto len_iterator()
     };
 }
 
-std::optional<std::size_t> len(std::shared_ptr<value> source)
+template <typename V, bool Const, typename T>
+decltype(auto) smart_cast(T&& ptr)
 {
-    if (const auto it = std::dynamic_pointer_cast<sequence_iterator_value<true>>(source))
-    {
-        return std::visit(
-            len_iterator(),
-            it->sequence
-        );
-    }
-
-    if (const auto it = std::dynamic_pointer_cast<sequence_iterator_value<false>>(source))
-    {
-        return std::visit(
-            len_iterator(),
-            it->sequence
-        );
-    }
-
-    if (const auto it = std::dynamic_pointer_cast<generator_value>(source))
-    {
-        const auto seq = value::create<sequence_value>(it);
-        return len(std::static_pointer_cast<value>(seq));
-    }
-
-    if (const auto it = std::dynamic_pointer_cast<sequence_value>(source))
-    {
-        it->drain_generator();
-        return it->values.size();
-    }
-
-    return std::nullopt;
+    return std::dynamic_pointer_cast<std::conditional_t<Const, std::add_const_t<V>, std::remove_const_t<V>>>(std::forward<T>(ptr));
 }
 
-std::optional<std::size_t> len(std::shared_ptr<const value> source)
+template <typename T>
+std::optional<std::size_t> len(T&& source)
 {
-    if (const auto it = std::dynamic_pointer_cast<const sequence_iterator_value<true>>(source))
+    using source_t = decltype(source);
+    static_assert(!std::is_pointer_v<source_t>);
+    static_assert(is_smart_pointer_v<std::remove_cvref_t<source_t>>);
+    using source_inner_t = type_decay_ptr_t<std::remove_cvref_t<source_t>>;
+    constexpr auto source_inner_const = std::is_const_v<source_inner_t>;
+
+#define CAST(to_type) (smart_cast<to_type, source_inner_const>(std::forward<T>(source)))  // NOLINT(cppcoreguidelines-macro-usage)
+
+    if (const auto it = CAST(sequence_iterator_value<true>))
     {
         return std::visit(
             len_iterator(),
@@ -1086,7 +1103,7 @@ std::optional<std::size_t> len(std::shared_ptr<const value> source)
         );
     }
 
-    if (const auto it = std::dynamic_pointer_cast<const sequence_iterator_value<false>>(source))
+    if (const auto it = CAST(sequence_iterator_value<false>))
     {
         return std::visit(
             len_iterator(),
@@ -1094,17 +1111,28 @@ std::optional<std::size_t> len(std::shared_ptr<const value> source)
         );
     }
 
-    if (const auto it = std::dynamic_pointer_cast<const generator_value>(source))
+    if (const auto it = CAST(generator_value))
     {
-        const auto seq = value::create<sequence_value>(std::const_pointer_cast<generator_value>(it));
-        return len(std::static_pointer_cast<value>(seq));
+        std::shared_ptr<sequence_value> seq;
+        if constexpr (source_inner_const)
+        {
+            seq = value::create<sequence_value>(std::const_pointer_cast<generator_value>(it));
+        }
+        else
+        {
+            seq = value::create<sequence_value>(it);
+        }
+
+        return len(seq);
     }
 
-    if (const auto it = std::dynamic_pointer_cast<const sequence_value>(source))
+    if (const auto it = CAST(sequence_value))
     {
         it->drain_generator();
         return it->values.size();
     }
+
+#undef CAST
 
     return std::nullopt;
 }
@@ -1476,7 +1504,7 @@ std::optional<int64_t> evaluate_to_number(const std::shared_ptr<value>& ast)
     return std::nullopt;
 }
 
-std::string str(std::shared_ptr<value> const& expression)
+std::string str(std::shared_ptr<value> const& expression, const bool force_explicit_call = false)
 {
     if (!expression)
         return "nullptr";
@@ -1484,6 +1512,7 @@ std::string str(std::shared_ptr<value> const& expression)
     std::ostringstream buffer;
 
     format_context context(buffer);
+    context.set_force_explicit_call(force_explicit_call);
     expression->format(context);
 
     return buffer.str();
@@ -1587,10 +1616,14 @@ void test_suite()
 
     "examples"_test = [] {
         "1"_test = [] {
-            auto ast = peg_parser(R"((let K = (val 10) in
+            const auto ast = peg_parser(
+                R"(
+
+(let K = (val 10) in
                                               (add
                                                   (val 5)
-                                                  (var K))))");
+                                                  (var K)))
+)");
 
             expect(evaluate_to_number(ast).value() == 15_ll);
 
@@ -1599,24 +1632,30 @@ void test_suite()
             expect(eq(str(eval), "(val 15)"s));
         };
         "2"_test = [] {
-            auto ast = peg_parser(R"((let A = (val 20) in
-                                              (let B = (val 30) in
-                                                  (if
-                                                      (var A)
-                                                      (add
-                                                          (var B)
-                                                          (val 3)
-                                                      )
-                                                      then
-                                                      (val 10)
-                                                      else
-                                                      (add
-                                                          (var B)
-                                                          (val 1)
-                                                      )
-                                                  )
-                                              )
-                                           ))");
+            const auto ast = peg_parser(
+                R"(
+
+(let A = (val 20) in
+    (let B = (val 30) in
+        (if
+            (var A)
+            (add
+                (var B)
+                (val 3)
+            )
+        then
+            (val 10)
+        else
+            (add
+                (var B)
+                (val 1)
+            )
+        )
+    )
+)
+
+                )"
+            );
 
             expect(evaluate_to_number(ast).value() == 31_ll);
 
@@ -1625,9 +1664,17 @@ void test_suite()
             expect(eq(str(eval), "(val 31)"s));
         };
         "3"_test = [] {
-            auto ast = peg_parser(R"((let F = (function arg (add (var arg) (val 1))) in
-                                              (let V = (val -1) in
-                                                  (call (var F) (var V)))))");
+            const auto ast = peg_parser(
+                R"(
+
+(let F = (function arg (add (var arg) (val 1))) in
+    (let V = (val -1) in
+        (call (var F) (var V))
+    )
+)
+
+                )"
+            );
 
             expect(evaluate_to_number(ast).value() == 0_ll);
 
@@ -1636,7 +1683,13 @@ void test_suite()
             expect(eq(str(eval), "(val 0)"s));
         };
         "4"_test = [] {
-            auto ast = peg_parser(R"((add (var A) (var B)))");
+            const auto ast = peg_parser(
+                R"(
+
+(add (var A) (var B))
+
+                )"
+            );
 
             expect(throws<std::exception>([&ast]()
             {
@@ -1647,8 +1700,14 @@ void test_suite()
 
     "extensions"_test = [] {
         "1"_test = [] {
-            auto ast = peg_parser(R"((let F = (function arg (add (var arg) (val 1))) in
-                                                          (var F)))");
+            const auto ast = peg_parser(
+                R"(
+
+(let F = (function arg (add (var arg) (val 1))) in
+    (var F))
+
+                )"
+            );
 
             auto evaluated = evaluate(ast);
             expect(static_cast<bool>(evaluated) == true_b);
@@ -1657,7 +1716,8 @@ void test_suite()
 
             expect(evaluate_to_number(ast).has_value() == false_b);
 
-            expect(eq(str(evaluated), "(function arg (add (var arg) (val 1)))"s));
+            expect(eq(str(evaluated, false), "(function arg (add (var arg) (val 1)))"s));
+            expect(eq(str(evaluated, true), "(function arg (add (var arg) (val 1)))"s));
         };
     };
 }
