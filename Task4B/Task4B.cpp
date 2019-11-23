@@ -76,21 +76,22 @@ constexpr char grammar[] =
     R"(
 
 expression <- _ (val / var / if / let / function / call / free_call) _
-val <- '(' 'val' integer ')'
-var <- '(' 'var' ident ')'
-if <- '(' 'if' expression expression 'then' expression 'else' expression ')'
-let <- '(' 'let' ident '=' expression 'in' expression ')'
-function <- '(' 'function' ident expression ')'
-call <- '(' 'call' expression expression ')'
-free_call <- '(' ident expression* ')'
+val        <- '(' 'val' integer ')'
+var        <- '(' 'var' ident ')'
+if         <- '(' 'if' expression expression 'then' expression 'else' expression ')'
+let        <- '(' 'let' ident '=' expression 'in' expression ')'
+function   <- '(' 'function' bind expression ')'
+call       <- '(' 'call' expression expression ')'
+free_call  <- '(' ident expression* ')'
 
+bind       <- (tuple / ident)
 ident      <- _ < [a-zA-Z] [a-zA-Z0-9]* > _
 integer    <- sign number
 sign       <- _ < [-+]? > _
 number     <- _ < [0-9]+ > _
+tuple      <- _ '[' bind (',' bind)* ']' _
 ~_         <- [ \t\r\n]*
 ~__        <- ![a-zA-Z0-9_] _
-
 
     )";
 
@@ -671,7 +672,7 @@ struct sequence_value final : value, std::enable_shared_from_this<sequence_value
     const_iterator cbegin() const;
     const_iterator cend() const;
 
-    size_type size();
+    size_type size() const;
 
     std::shared_ptr<value> evaluate() override;
 
@@ -1279,7 +1280,7 @@ sequence_value::const_iterator sequence_value::cend() const
     return const_iterator(shared_from_this(), sequence_iterator_end);
 }
 
-sequence_value::size_type sequence_value::size()
+sequence_value::size_type sequence_value::size() const
 {
     return std::distance(cbegin(), cend());
 }
@@ -1431,22 +1432,56 @@ std::shared_ptr<value> parse_into_ast(const std::shared_ptr<ast_tree_context>& a
         return std::static_pointer_cast<value>(value::create<condition_value>(left, condition_operator_kind::greater, right, suite_true, suite_false));
     }
 
+    if (node_name == "bind")
+    {
+        auto&& nodes = ast->nodes;
+        DEBUG_ASSERT(nodes.size() == 1, assert_module{});
+
+        auto&& inner_type = nodes[0]->name;
+
+        if (inner_type == "ident")
+        {
+            return ast_context->name_lookup->define(nodes[0]->token);
+        }
+
+        DEBUG_ASSERT(inner_type == "tuple", assert_module{});
+
+        return parse_into_ast(ast_context, nodes[0]);
+    }
+
+    if (node_name == "tuple")
+    {
+        auto&& nodes = ast->nodes;
+        DEBUG_ASSERT(!nodes.empty(), assert_module{});
+
+        std::deque<sequence_value::value_type> values;
+
+        for (auto&& ast_argument : nodes)
+        {
+            values.push_back(parse_into_ast(ast_context, ast_argument));
+        }
+
+        return value::create<sequence_value>(values);
+    }
+
     if (node_name == "function")
     {
         auto&& nodes = ast->nodes;
         DEBUG_ASSERT(nodes.size() == 2, assert_module{});
-        DEBUG_ASSERT(nodes[0]->name == "ident", assert_module{});
+        DEBUG_ASSERT(nodes[0]->name == "bind", assert_module{});
         DEBUG_ASSERT(nodes[1]->original_name == "expression", assert_module{});
 
-        auto&& identifier = nodes[0]->token;
-
         const auto context = context_base::create<ast_tree_context>(ast_context);
-        const auto variable = context->name_lookup->define(identifier);
+
+        std::shared_ptr<value> args = parse_into_ast(context, nodes[0]);
+
+        if (!static_cast<bool>(std::dynamic_pointer_cast<sequence_value>(args)))
+        {
+            const std::deque<sequence_value::value_type> values{args};
+            args = value::create<sequence_value>(values);
+        }
 
         auto&& body = parse_into_ast(context, nodes[1]);
-
-        const std::deque<sequence_value::value_type> values{ variable };
-        auto&& args = value::create<sequence_value>(values);
 
         return value::create<managed_function_value>(args, context->name_lookup, body);
     }
@@ -1480,11 +1515,13 @@ std::shared_ptr<value> parse_into_ast(const std::shared_ptr<ast_tree_context>& a
         {
             std::deque<sequence_value::value_type> values;
 
+            // When will <range> finally arrive?
             auto first = true;
             for (auto&& ast_argument : nodes)
             {
                 if (first)
                 {
+                    // So uncivilized.
                     first = false;
                     continue;
                 }
@@ -1730,7 +1767,7 @@ void test_suite()
             expect(eq(str(evaluated, false), "(val 31)"s));
             expect(eq(str(evaluated, true), "(val 31)"s));
         };
-        skip | "3"_test = [] {
+        "3"_test = [] {
             const auto ast = peg_parser(
                 R"(
 
