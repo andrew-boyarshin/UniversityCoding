@@ -74,14 +74,15 @@ inline constexpr bool is_smart_pointer_v = is_smart_pointer<T>::value;
 
 constexpr char grammar[] =
     R"(
-expression <- _ (val / var / add / if / let / function / call) _
+
+expression <- _ (val / var / if / let / function / call / free_call) _
 val <- '(' 'val' integer ')'
 var <- '(' 'var' ident ')'
-add <- '(' 'add' expression expression ')'
 if <- '(' 'if' expression expression 'then' expression 'else' expression ')'
 let <- '(' 'let' ident '=' expression 'in' expression ')'
 function <- '(' 'function' ident expression ')'
 call <- '(' 'call' expression expression ')'
+free_call <- '(' ident expression* ')'
 
 ident      <- _ < [a-zA-Z] [a-zA-Z0-9]* > _
 integer    <- sign number
@@ -89,6 +90,8 @@ sign       <- _ < [-+]? > _
 number     <- _ < [0-9]+ > _
 ~_         <- [ \t\r\n]*
 ~__        <- ![a-zA-Z0-9_] _
+
+
     )";
 
 enum class condition_operator_kind
@@ -1464,22 +1467,35 @@ std::shared_ptr<value> parse_into_ast(const std::shared_ptr<ast_tree_context>& a
         return value::create<call_value>(what, args);
     }
 
-    // not found
-    auto var = (*ast_context->name_lookup)[node_name]->bind(ast_context->name_lookup).bound_variable;
-    if (var)
+    if (node_name == "free_call")
     {
         auto&& nodes = ast->nodes;
+        DEBUG_ASSERT(!nodes.empty(), assert_module{});
+        DEBUG_ASSERT(nodes[0]->name == "ident", assert_module{});
 
-        std::deque<sequence_value::value_type> values;
+        auto&& identifier = nodes[0]->token;
 
-        for (auto && ast_argument : nodes)
+        auto var = (*ast_context->name_lookup)[identifier]->bind(ast_context->name_lookup).bound_variable;
+        if (var)
         {
-            values.push_back(parse_into_ast(ast_context, ast_argument));
+            std::deque<sequence_value::value_type> values;
+
+            auto first = true;
+            for (auto&& ast_argument : nodes)
+            {
+                if (first)
+                {
+                    first = false;
+                    continue;
+                }
+
+                values.push_back(parse_into_ast(ast_context, ast_argument));
+            }
+
+            auto&& args = value::create<sequence_value>(values);
+
+            return value::create<call_value>(var, args);
         }
-
-        auto&& args = value::create<sequence_value>(values);
-
-        return value::create<call_value>(var, args);
     }
 
     DEBUG_UNREACHABLE(assert_module{});
@@ -1490,18 +1506,6 @@ std::shared_ptr<value> parse_into_ast(const std::shared_ptr<ast_tree_context>& a
 std::shared_ptr<value> evaluate(const std::shared_ptr<value>& ast)
 {
     return ast->evaluate();
-}
-
-std::optional<int64_t> evaluate_to_number(const std::shared_ptr<value>& ast)
-{
-    const auto result = evaluate(ast);
-
-    if (auto num = std::dynamic_pointer_cast<integer_value>(result))
-    {
-        return num->value;
-    }
-
-    return std::nullopt;
 }
 
 std::string str(std::shared_ptr<value> const& expression, const bool force_explicit_call = false)
@@ -1608,7 +1612,8 @@ bool condition_value::evaluate_condition() const
             throw std::exception("Unknown comparison kind");
     }
 }
-
+#pragma warning( push )
+#pragma warning( disable : 26444 )
 void test_suite()
 {
     using namespace boost::ut;
@@ -1624,8 +1629,6 @@ void test_suite()
                                                   (val 5)
                                                   (var K)))
 )");
-
-            expect(evaluate_to_number(ast).value() == 15_ll);
 
             const auto eval = evaluate(ast);
 
@@ -1657,8 +1660,6 @@ void test_suite()
                 )"
             );
 
-            expect(evaluate_to_number(ast).value() == 31_ll);
-
             const auto eval = evaluate(ast);
 
             expect(eq(str(eval), "(val 31)"s));
@@ -1676,8 +1677,6 @@ void test_suite()
                 )"
             );
 
-            expect(evaluate_to_number(ast).value() == 0_ll);
-
             const auto eval = evaluate(ast);
 
             expect(eq(str(eval), "(val 0)"s));
@@ -1691,10 +1690,7 @@ void test_suite()
                 )"
             );
 
-            expect(throws<std::exception>([&ast]()
-            {
-                evaluate(ast);
-            }));
+            expect(throws<std::exception>([&ast] { evaluate(ast); }));
         };
     };
 
@@ -1709,15 +1705,48 @@ void test_suite()
                 )"
             );
 
-            auto evaluated = evaluate(ast);
+            const auto evaluated = evaluate(ast);
             expect(static_cast<bool>(evaluated) == true_b);
-            auto evaluated_fun = std::dynamic_pointer_cast<function_value>(evaluated);
+            const auto evaluated_fun = std::dynamic_pointer_cast<function_value>(evaluated);
             expect(static_cast<bool>(evaluated_fun) == true_b);
-
-            expect(evaluate_to_number(ast).has_value() == false_b);
 
             expect(eq(str(evaluated, false), "(function arg (add (var arg) (val 1)))"s));
             expect(eq(str(evaluated, true), "(function arg (add (var arg) (val 1)))"s));
         };
+        "2"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+(let F = (function arg (add (var arg) (val 1) (var arg))) in
+    (F (val 15))
+)
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "(val 31)"s));
+            expect(eq(str(evaluated, true), "(val 31)"s));
+        };
+        skip | "3"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+(let F = (function [x,y] (add (var x) (val 1) (var y))) in
+    (F (val 15) (val 30))
+)
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "(val 46)"s));
+            expect(eq(str(evaluated, true), "(val 46)"s));
+        };
     };
 }
+#pragma warning( pop )
