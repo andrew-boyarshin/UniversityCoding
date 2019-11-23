@@ -564,18 +564,98 @@ protected:
     }
 };
 
-struct add_function_value final : native_function_value
+struct accumulator_function_value : native_function_value
 {
     std::shared_ptr<value> execute_impl(std::shared_ptr<sequence_value> arguments) override;
+
+    virtual void accumulate(int64_t& accumulator, int64_t value) const = 0;
 
     format_context& format(format_context& output) const override
     {
         throw std::exception("Shouldn't be formatted");
     }
 
+protected:
+    explicit accumulator_function_value(std::shared_ptr<name_lookup_context> scope)
+        : native_function_value(std::move(scope))
+    {
+    }
+};
+
+struct add_function_value final : accumulator_function_value
+{
+    void accumulate(int64_t& accumulator, const int64_t value) const override
+    {
+        accumulator += value;
+    }
+
 private:
     explicit add_function_value(std::shared_ptr<name_lookup_context> scope)
-        : native_function_value(std::move(scope))
+        : accumulator_function_value(std::move(scope))
+    {
+    }
+
+    friend struct value;
+};
+
+struct sub_function_value final : accumulator_function_value
+{
+    void accumulate(int64_t& accumulator, const int64_t value) const override
+    {
+        accumulator -= value;
+    }
+
+private:
+    explicit sub_function_value(std::shared_ptr<name_lookup_context> scope)
+        : accumulator_function_value(std::move(scope))
+    {
+    }
+
+    friend struct value;
+};
+
+struct mul_function_value final : accumulator_function_value
+{
+    void accumulate(int64_t& accumulator, const int64_t value) const override
+    {
+        accumulator *= value;
+    }
+
+private:
+    explicit mul_function_value(std::shared_ptr<name_lookup_context> scope)
+        : accumulator_function_value(std::move(scope))
+    {
+    }
+
+    friend struct value;
+};
+
+struct div_function_value final : accumulator_function_value
+{
+    void accumulate(int64_t& accumulator, const int64_t value) const override
+    {
+        accumulator /= value;
+    }
+
+private:
+    explicit div_function_value(std::shared_ptr<name_lookup_context> scope)
+        : accumulator_function_value(std::move(scope))
+    {
+    }
+
+    friend struct value;
+};
+
+struct rem_function_value final : accumulator_function_value
+{
+    void accumulate(int64_t& accumulator, const int64_t value) const override
+    {
+        accumulator %= value;
+    }
+
+private:
+    explicit rem_function_value(std::shared_ptr<name_lookup_context> scope)
+        : accumulator_function_value(std::move(scope))
     {
     }
 
@@ -1195,14 +1275,14 @@ variable_late_binding::variable_late_binding(std::shared_ptr<variable> bound_var
 {
 }
 
-std::shared_ptr<value> add_function_value::execute_impl(std::shared_ptr<sequence_value> arguments)
+std::shared_ptr<value> accumulator_function_value::execute_impl(std::shared_ptr<sequence_value> arguments)
 {
     int64_t result = 0;
     for (auto&& value : *arguments)
     {
         if (const auto integral = std::dynamic_pointer_cast<integer_value>(value))
         {
-            result += integral->value;
+            accumulate(result, integral->value);
         }
         else
         {
@@ -1577,6 +1657,10 @@ std::shared_ptr<value> peg_parser(const std::string& source)
     const auto add_function = value::create<add_function_value>(context->name_lookup);
     context->name_lookup->define("add")->value = add_function;
     context->name_lookup->define("+")->value = add_function;
+    context->name_lookup->define("-")->value = value::create<sub_function_value>(context->name_lookup);
+    context->name_lookup->define("*")->value = value::create<mul_function_value>(context->name_lookup);
+    context->name_lookup->define("/")->value = value::create<div_function_value>(context->name_lookup);
+    context->name_lookup->define("%")->value = value::create<rem_function_value>(context->name_lookup);
 
     return parse_into_ast(context, ast);
 }
