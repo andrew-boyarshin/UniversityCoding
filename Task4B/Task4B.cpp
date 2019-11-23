@@ -10,6 +10,8 @@
 #include <charconv>
 #include <optional>
 #include <compare>
+#include <string_view>
+#include <string>
 
 #define NOGDI
 
@@ -32,7 +34,7 @@ std::string slurp(std::ifstream & in) {
 }
 
 template <typename T>
-using type_decay_basic_t = std::remove_cv_t<std::remove_pointer_t<std::remove_cv_t<std::remove_reference_t<T>>>>;
+using type_decay_basic_t = std::remove_cv_t<std::remove_pointer_t<std::remove_cvref_t<T>>>;
 
 template <typename T>
 struct type_decay_ptr
@@ -50,7 +52,25 @@ template <typename T>
 using type_decay_ptr_t = typename type_decay_ptr<T>::type;
 
 template <typename T>
-using type_decay_t = type_decay_basic_t<type_decay_ptr_t<type_decay_basic_t<std::remove_cv_t<T>>>>;
+using type_decay_t = type_decay_basic_t<type_decay_ptr_t<type_decay_basic_t<T>>>;
+
+template <typename>
+struct is_smart_pointer : std::false_type
+{
+};
+
+template <typename T, typename D>
+struct is_smart_pointer<std::unique_ptr<T, D>> : std::true_type
+{
+};
+
+template <typename T>
+struct is_smart_pointer<std::shared_ptr<T>> : std::true_type
+{
+};
+
+template <class T>
+inline constexpr bool is_smart_pointer_v = is_smart_pointer<T>::value;
 
 constexpr char grammar[] =
     R"(
@@ -108,12 +128,39 @@ struct sequence_iterator_end_t
 
 const sequence_iterator_end_t sequence_iterator_end;
 
-struct format_raise_precedence_t
+struct format_raise_precedence final
 {
-    explicit format_raise_precedence_t() = default;
+    std::int16_t difference;
+
+    explicit format_raise_precedence(const std::int16_t difference)
+        : difference(difference)
+    {
+    }
+
+    ~format_raise_precedence() = default;
+
+    format_raise_precedence(const format_raise_precedence& other) = default;
+    format_raise_precedence(format_raise_precedence&& other) noexcept = default;
+    format_raise_precedence& operator=(const format_raise_precedence& other) = default;
+    format_raise_precedence& operator=(format_raise_precedence&& other) noexcept = default;
 };
 
-const format_raise_precedence_t format_raise_precedence;
+struct format_set_precedence final
+{
+    std::int16_t value;
+
+    explicit format_set_precedence(const std::int16_t value)
+        : value(value)
+    {
+    }
+
+    ~format_set_precedence() = default;
+
+    format_set_precedence(const format_set_precedence& other) = default;
+    format_set_precedence(format_set_precedence&& other) noexcept = default;
+    format_set_precedence& operator=(const format_set_precedence& other) = default;
+    format_set_precedence& operator=(format_set_precedence&& other) noexcept = default;
+};
 
 std::shared_ptr<value> next(std::shared_ptr<value> source);
 std::optional<std::size_t> len(std::shared_ptr<value> source);
@@ -174,78 +221,107 @@ public:
 class format_context
 {
     std::ostream* stream_;
-    bool implicit_scopes_ = false;
 public:
     class scope;
 private:
     scope* current_scope_ = nullptr;
+
+    void raise_precedence_impl(const format_raise_precedence& value)
+    {
+        const auto scope = current_scope();
+        DEBUG_ASSERT(scope, assert_module{});
+        auto precedence = scope->precedence();
+        DEBUG_ASSERT(precedence.has_value(), assert_module{});
+        const auto new_precedence = precedence.value() - value.difference;
+        set_precedence_impl(format_set_precedence(new_precedence));
+    }
+
+    void set_precedence_impl(const format_set_precedence& value)
+    {
+        const auto scope = current_scope();
+        DEBUG_ASSERT(scope, assert_module{});
+        scope->set_precedence(value.value);
+    }
+
 public:
     explicit format_context(std::ostream& stream)
         : stream_(&stream)
     {
     }
 
-    format_context& operator<<(const value& obj)
+    template<typename T>
+    format_context& operator<<(T&& obj)
     {
-        return obj.format(*this);
+        using obj_t = decltype(obj);
+        if constexpr (std::is_base_of_v<value, type_decay_t<obj_t>>)
+        {
+            static_assert(!std::is_pointer_v<obj_t>);
+            if constexpr (is_smart_pointer_v<std::remove_cvref_t<obj_t>>)
+            {
+                return obj->format(*this);
+            }
+            else
+            {
+                static_assert(std::is_reference_v<obj_t>);
+                return obj.format(*this);
+            }
+        }
+        else if constexpr (std::is_base_of_v<format_raise_precedence, type_decay_t<obj_t>>)
+        {
+            raise_precedence_impl(obj);
+        }
+        else if constexpr (std::is_base_of_v<format_set_precedence, type_decay_t<obj_t>>)
+        {
+            set_precedence_impl(obj);
+        }
+        else
+        {
+            *stream_ << obj;
+        }
+
+        return *this;
     }
 
-    template <typename T, std::enable_if_t<std::is_base_of_v<value, type_decay_t<T>>>* = nullptr>
-    format_context& operator<<(const std::shared_ptr<T>& obj)
-    {
-        return obj->format(*this);
-    }
-
-    /**
-     * Should we assume there is defined operator precedence and there is no need to explicitly define the order of operations?
-     * true - omit parentheses when not necessary
-     * false - always print all parentheses
-     */
-    bool implicit_scopes() const
-    {
-        return implicit_scopes_;
-    }
-
-    void set_implicit_scopes(const bool implicit_scopes)
-    {
-        implicit_scopes_ = implicit_scopes;
-    }
-
-    scope* current_scope() const
+    [[nodiscard]] scope* current_scope() const
     {
         return current_scope_;
     }
 
-    template <typename T, std::enable_if_t<!std::is_base_of_v<value, type_decay_t<T>>> * = nullptr>
-    format_context& operator<<(const T& obj)
+    [[nodiscard]] bool parameter_pack() const
     {
-        *stream_ << obj;
-        return *this;
-    }
-
-    format_context& operator<<(const format_raise_precedence_t&)
-    {
-        current_scope()->set_precedence(current_scope()->precedence() - 1);
-        return *this;
+        const auto scope = current_scope();
+        return scope ? scope->parameter_pack() : false;
     }
 
     class scope final
     {
         format_context* const context_;
         scope* const parent_;
-        std::int16_t precedence_;
-        bool const wrap_in_brackets_;
-    public:
-        scope(format_context& context, std::int16_t precedence)
-            : context_(&context), parent_(context.current_scope()), precedence_(precedence),
-            wrap_in_brackets_(!context.implicit_scopes() || (parent_ ? parent_->precedence_ < precedence : false))
+        std::optional<std::int16_t> precedence_;
+        bool wrap_in_brackets_ = false;
+        std::optional<bool> parameter_pack_;
+
+        [[nodiscard]] bool is_lower_precedence(const std::int16_t other) const
         {
-            context.current_scope_ = this;
+            const auto precedence = this->precedence();
+            return precedence.has_value() ? precedence.value() < other : false;
+        }
+
+    public:
+        scope(format_context& context, std::int16_t precedence) : scope(context)
+        {
+            precedence_ = precedence;
+            wrap_in_brackets_ = parent_ ? parent_->is_lower_precedence(precedence) : false;
 
             if (wrap_in_brackets_)
             {
                 context << '(';
             }
+        }
+
+        explicit scope(format_context& context) : context_(&context), parent_(context.current_scope())
+        {
+            context.current_scope_ = this;
         }
 
         ~scope()
@@ -265,14 +341,30 @@ public:
             context_->current_scope_ = parent_;
         }
 
-        scope* parent() const
+        [[nodiscard]] scope* parent() const
         {
             return parent_;
         }
 
-        std::int16_t precedence() const
+        [[nodiscard]] std::optional<std::int16_t> precedence() const
         {
-            return precedence_;
+            if (precedence_.has_value())
+            {
+                return precedence_;
+            }
+
+            auto* parent = parent_;
+            while (parent)
+            {
+                if (parent->precedence_.has_value())
+                {
+                    return parent->precedence_.value();
+                }
+
+                parent = parent->parent_;
+            }
+
+            return std::nullopt;
         }
 
         void set_precedence(const std::int16_t precedence)
@@ -280,9 +372,35 @@ public:
             precedence_ = precedence;
         }
 
-        bool wrap_in_brackets() const
+        [[nodiscard]] bool wrap_in_brackets() const
         {
             return wrap_in_brackets_;
+        }
+
+        [[nodiscard]] bool parameter_pack() const
+        {
+            if (parameter_pack_.has_value())
+            {
+                return parameter_pack_.value();
+            }
+
+            auto* parent = parent_;
+            while (parent)
+            {
+                if (parent->parameter_pack_.has_value())
+                {
+                    return parent->parameter_pack_.value();
+                }
+
+                parent = parent->parent_;
+            }
+
+            return false;
+        }
+
+        void set_parameter_pack(const bool parameter_pack)
+        {
+            parameter_pack_ = parameter_pack;
         }
 
         scope(const scope& other) = delete;
@@ -449,7 +567,14 @@ struct managed_function_value final : function_value
 
     format_context& format(format_context& output) const override
     {
-        return output << "(function " << argument << " " << body << ")";
+        output << "(function ";
+        {
+            DEBUG_ASSERT(!output.parameter_pack(), assert_module{});
+            format_context::scope scope(output);
+            scope.set_parameter_pack(true);
+            output << argument;
+        }
+        return output << " " << body << ")";
     }
 
 private:
@@ -511,7 +636,7 @@ struct sequence_value final : value, std::enable_shared_from_this<sequence_value
     using difference_type = std::ptrdiff_t;
     using size_type = std::size_t;
 
-    std::deque<value_type> values;
+    mutable std::deque<value_type> values;
     std::shared_ptr<generator_value> generator;
 
     iterator begin();
@@ -527,7 +652,7 @@ struct sequence_value final : value, std::enable_shared_from_this<sequence_value
 
     std::shared_ptr<value> evaluate() override;
 
-    void drain_generator();
+    void drain_generator() const;
 
     format_context& format(format_context& output) const override;
 
@@ -748,7 +873,7 @@ struct condition_value final : value
     std::shared_ptr<value> suite_true;
     std::shared_ptr<value> suite_false;
 
-    bool evaluate_condition();
+    bool evaluate_condition() const;
 
     std::shared_ptr<value> evaluate() override
     {
@@ -786,6 +911,9 @@ struct variable final : value
 
     format_context& format(format_context& output) const override
     {
+        if (output.parameter_pack())
+            return output << name;
+
         return output << "(var " << name << ")";
     }
 
@@ -974,10 +1102,7 @@ std::optional<std::size_t> len(std::shared_ptr<const value> source)
 
     if (const auto it = std::dynamic_pointer_cast<const sequence_value>(source))
     {
-        if (it->generator)
-        {
-            throw std::exception("Const sequence with generator");
-        }
+        it->drain_generator();
         return it->values.size();
     }
 
@@ -1147,7 +1272,7 @@ std::shared_ptr<value> sequence_value::evaluate()
     return create<sequence_value>(result);
 }
 
-void sequence_value::drain_generator()
+void sequence_value::drain_generator() const
 {
     if (!generator)
         return;
@@ -1160,9 +1285,16 @@ void sequence_value::drain_generator()
 
 format_context& sequence_value::format(format_context& output) const
 {
-    std::launder(const_cast<sequence_value*>(this))->drain_generator();
+    this->drain_generator();
+
+    auto first = true;
     for (auto&& value : *this)
     {
+        if (!first)
+            output << ' ';
+        else
+            first = false;
+
         output << value;
     }
 
@@ -1344,7 +1476,7 @@ std::optional<int64_t> evaluate_to_number(const std::shared_ptr<value>& ast)
     return std::nullopt;
 }
 
-std::string str(std::shared_ptr<value> const& expression, bool implicit_scopes = false)
+std::string str(std::shared_ptr<value> const& expression)
 {
     if (!expression)
         return "nullptr";
@@ -1352,7 +1484,6 @@ std::string str(std::shared_ptr<value> const& expression, bool implicit_scopes =
     std::ostringstream buffer;
 
     format_context context(buffer);
-    context.set_implicit_scopes(implicit_scopes);
     expression->format(context);
 
     return buffer.str();
@@ -1425,7 +1556,7 @@ std::shared_ptr<value> call_value::evaluate()
     return function->execute(arguments);
 }
 
-bool condition_value::evaluate_condition()
+bool condition_value::evaluate_condition() const
 {
     auto&& left = this->left->evaluate();
     auto&& right = this->right->evaluate();
@@ -1452,6 +1583,7 @@ bool condition_value::evaluate_condition()
 void test_suite()
 {
     using namespace boost::ut;
+    using namespace std::literals;
 
     "examples"_test = [] {
         "1"_test = [] {
@@ -1464,7 +1596,7 @@ void test_suite()
 
             const auto eval = evaluate(ast);
 
-            expect(eq(str(eval), std::string("(val 15)")));
+            expect(eq(str(eval), "(val 15)"s));
         };
         "2"_test = [] {
             auto ast = peg_parser(R"((let A = (val 20) in
@@ -1490,7 +1622,7 @@ void test_suite()
 
             const auto eval = evaluate(ast);
 
-            expect(eq(str(eval), std::string("(val 31)")));
+            expect(eq(str(eval), "(val 31)"s));
         };
         "3"_test = [] {
             auto ast = peg_parser(R"((let F = (function arg (add (var arg) (val 1))) in
@@ -1501,7 +1633,7 @@ void test_suite()
 
             const auto eval = evaluate(ast);
 
-            expect(eq(str(eval), std::string("(val 0)")));
+            expect(eq(str(eval), "(val 0)"s));
         };
         "4"_test = [] {
             auto ast = peg_parser(R"((add (var A) (var B)))");
@@ -1524,6 +1656,8 @@ void test_suite()
             expect(static_cast<bool>(evaluated_fun) == true_b);
 
             expect(evaluate_to_number(ast).has_value() == false_b);
+
+            expect(eq(str(evaluated), "(function arg (add (var arg) (val 1)))"s));
         };
     };
 }
