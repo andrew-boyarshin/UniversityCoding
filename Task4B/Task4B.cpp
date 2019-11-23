@@ -85,7 +85,7 @@ call       <- '(' 'call' expression expression ')'
 free_call  <- '(' ident expression* ')'
 
 bind       <- (tuple / ident)
-ident      <- _ < [a-zA-Z] [a-zA-Z0-9]* > _
+ident      <- _ < (([a-zA-Z] [a-zA-Z0-9]*) / '+' / '-' / '*' / '/') > _
 integer    <- sign number
 sign       <- _ < [-+]? > _
 number     <- _ < [0-9]+ > _
@@ -1542,6 +1542,7 @@ std::shared_ptr<value> parse_into_ast(const std::shared_ptr<ast_tree_context>& a
 
 std::shared_ptr<value> evaluate(const std::shared_ptr<value>& ast)
 {
+    DEBUG_ASSERT(ast, assert_module{});
     return ast->evaluate();
 }
 
@@ -1572,7 +1573,11 @@ std::shared_ptr<value> peg_parser(const std::string& source)
         return nullptr;
 
     const auto context = context_base::create<ast_tree_context>();
-    context->name_lookup->define("add")->value = value::create<add_function_value>(context->name_lookup);
+
+    const auto add_function = value::create<add_function_value>(context->name_lookup);
+    context->name_lookup->define("add")->value = add_function;
+    context->name_lookup->define("+")->value = add_function;
+
     return parse_into_ast(context, ast);
 }
 
@@ -1772,6 +1777,23 @@ void test_suite()
                 R"(
 
 (let F = (function [x,y] (add (var x) (val 1) (var y))) in
+    (F (val 15) (val 30))
+)
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "(val 46)"s));
+            expect(eq(str(evaluated, true), "(val 46)"s));
+        };
+        "4"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+(let F = (function [x,y] (+ (var x) (val 1) (var y))) in
     (F (val 15) (val 30))
 )
 
