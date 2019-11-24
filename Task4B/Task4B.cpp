@@ -74,7 +74,7 @@ inline constexpr bool is_smart_pointer_v = is_smart_pointer<T>::value;
 constexpr char grammar[] =
     R"(
 
-expression   <- _ (val / var / if / let / function / call / free_call / list / generator) (ternary)? _
+expression   <- _ (val / var / if / let / function / call / free_call / list / generator) _ (ternary)? _
 val          <- '(' 'val' integer ')'
 var          <- '(' 'var' ident ')'
 if           <- '(' 'if' expression expression 'then' expression 'else' expression ')'
@@ -1157,7 +1157,7 @@ struct condition_value final : value
 
     std::shared_ptr<value> evaluate(const std::shared_ptr<name_lookup_context>& context) override
     {
-        return evaluate_condition(context) ? suite_true->evaluate(context) : suite_false->evaluate(context);
+        return evaluate_condition(context) ? suite_true->evaluate(context) : suite_false ? suite_false->evaluate(context) : nullptr;
     }
 
     format_context& format(format_context& output) const override
@@ -1167,7 +1167,7 @@ struct condition_value final : value
 
 private:
     condition_value(std::shared_ptr<value> left, const condition_operator_kind kind, std::shared_ptr<value> right,
-        std::shared_ptr<value> suite_true, std::shared_ptr<value> suite_false)
+                    std::shared_ptr<value> suite_true, std::shared_ptr<value> suite_false)
         : left(std::move(left)),
           kind(kind),
           right(std::move(right)),
@@ -1391,14 +1391,23 @@ std::shared_ptr<value> variable_late_binding::evaluate(const std::shared_ptr<nam
 
 std::shared_ptr<value> accumulator_function_value::execute_impl(const std::shared_ptr<name_lookup_context>& context, std::shared_ptr<sequence_value> arguments)
 {
-    int64_t result = 0;
+    int64_t result;
 
     const auto arguments_view = arguments->view(context);
+
+    auto first = true;
 
     for (auto&& value : *arguments_view)
     {
         if (const auto integral = std::dynamic_pointer_cast<integer_value>(value))
         {
+            if (first)
+            {
+                result = integral->value;
+                first = false;
+                continue;
+            }
+
             accumulate(result, integral->value);
         }
         else
@@ -1693,13 +1702,68 @@ std::shared_ptr<value> parse_bind(const std::shared_ptr<name_lookup_context>& co
     return args;
 }
 
+condition_operator_kind parse_condition_operator_kind(const std::string& token)
+{
+    if (token == "==")
+        return condition_operator_kind::equal;
+    if (token == "!=")
+        return condition_operator_kind::not_equal;
+    if (token == "<")
+        return condition_operator_kind::less;
+    if (token == "<=")
+        return condition_operator_kind::less_equal;
+    if (token == ">")
+        return condition_operator_kind::greater;
+    if (token == ">=")
+        return condition_operator_kind::greater_equal;
+    throw std::exception("Unrecognized comparison kind");
+}
+
 std::shared_ptr<value> parse_into_ast(const std::shared_ptr<peg::Ast>& ast)
 {
     auto&& node_name = ast->name;
 
-    if (node_name == "expression" && ast->nodes.size() == 1)
+    if (node_name == "expression")
     {
-        return parse_into_ast(ast->nodes.front());
+        auto&& nodes = ast->nodes;
+        if (nodes.size() == 1)
+        {
+            return parse_into_ast(nodes.front());
+        }
+
+        DEBUG_ASSERT(nodes.size() == 2, assert_module{});
+        DEBUG_ASSERT(nodes[1]->original_name == "ternary", assert_module{});
+
+        auto&& value = parse_into_ast(nodes[0]);
+
+        auto&& ternary_nodes = nodes[1]->nodes;
+        DEBUG_ASSERT(ternary_nodes[0]->original_name == "condition", assert_module{});
+
+        auto&& condition_nodes = ternary_nodes[0]->nodes;
+        DEBUG_ASSERT(condition_nodes.size() == 3, assert_module{});
+        DEBUG_ASSERT(condition_nodes[0]->original_name == "expression", assert_module{});
+        DEBUG_ASSERT(condition_nodes[1]->is_token, assert_module{});
+        DEBUG_ASSERT(condition_nodes[2]->original_name == "expression", assert_module{});
+        auto&& left = parse_into_ast(condition_nodes[0]);
+        auto&& kind = parse_condition_operator_kind(condition_nodes[1]->token);
+        auto&& right = parse_into_ast(condition_nodes[2]);
+
+        std::shared_ptr<::value> suite_false;
+        if (ternary_nodes.size() > 1)
+        {
+            DEBUG_ASSERT(ternary_nodes.size() == 2, assert_module{});
+            DEBUG_ASSERT(ternary_nodes[1]->original_name == "ternary_else", assert_module{});
+            suite_false = parse_into_ast(ternary_nodes[1]);
+        }
+
+        return value::create<condition_value>(left, kind, right, value, suite_false);
+    }
+
+    if (node_name == "ternary_else")
+    {
+        auto&& nodes = ast->nodes;
+        DEBUG_ASSERT(nodes.size() == 1, assert_module{});
+        return parse_into_ast(nodes.front());
     }
 
     if (node_name == "integer")
@@ -1770,7 +1834,7 @@ std::shared_ptr<value> parse_into_ast(const std::shared_ptr<peg::Ast>& ast)
         auto&& suite_true = parse_into_ast(nodes[2]);
         auto&& suite_false = parse_into_ast(nodes[3]);
 
-        return std::static_pointer_cast<value>(value::create<condition_value>(left, condition_operator_kind::greater, right, suite_true, suite_false));
+        return value::create<condition_value>(left, condition_operator_kind::greater, right, suite_true, suite_false);
     }
 
     if (node_name == "function")
@@ -2311,7 +2375,7 @@ void test_suite()
             expect(eq(str(evaluated, false), "[(val 1), (val 2), (val 3), (val 4)]"s));
             expect(eq(str(evaluated, true), "[(val 1), (val 2), (val 3), (val 4)]"s));
         };
-        skip | "7"_test = [] {
+        "7"_test = [] {
             const auto ast = peg_parser(
                 R"(
 
@@ -2359,6 +2423,51 @@ void test_suite()
 
             expect(eq(str(evaluated, false), "(val 66)"s));
             expect(eq(str(evaluated, true), "(val 66)"s));
+        };
+        "10"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+[for x in (range (val 2) (val 5)): (+ (var x) (val 1))]
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "[(val 3), (val 4), (val 5)]"s));
+            expect(eq(str(evaluated, true), "[(val 3), (val 4), (val 5)]"s));
+        };
+        "11"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+(val 1) if (val 2) >= (val 3) else (val 4)
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "(val 4)"s));
+            expect(eq(str(evaluated, true), "(val 4)"s));
+        };
+        "12"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+[for x in (range (val 1) (val 4)): (var x) if (% (var x) (val 2)) == (val 0) else (val 0)]
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "[(val 0), (val 2), (val 0)]"s));
+            expect(eq(str(evaluated, true), "[(val 0), (val 2), (val 0)]"s));
         };
     };
 }
