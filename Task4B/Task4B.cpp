@@ -174,8 +174,6 @@ struct format_set_precedence final
     format_set_precedence& operator=(format_set_precedence&& other) noexcept = default;
 };
 
-std::shared_ptr<value> next(const std::shared_ptr<name_lookup_context>& context, const std::shared_ptr<value> source);
-
 template <typename T>
 std::optional<std::size_t> len(const std::shared_ptr<name_lookup_context>& context, T&& source);
 
@@ -674,6 +672,11 @@ protected:
 
 struct native_function_value : function_value
 {
+    format_context& format(format_context& output) const override
+    {
+        throw std::exception("Shouldn't be formatted");
+    }
+
 protected:
     explicit native_function_value() = default;
 };
@@ -683,11 +686,6 @@ struct accumulator_function_value : native_function_value
     std::shared_ptr<value> execute_impl(const std::shared_ptr<name_lookup_context>& context, std::shared_ptr<sequence_value> arguments) override;
 
     virtual void accumulate(int64_t& accumulator, int64_t value) const = 0;
-
-    format_context& format(format_context& output) const override
-    {
-        throw std::exception("Shouldn't be formatted");
-    }
 
 protected:
     explicit accumulator_function_value() = default;
@@ -779,41 +777,22 @@ private:
     friend struct value;
 };
 
-struct generator_value final : value
+struct generator_value : value, std::enable_shared_from_this<generator_value>
 {
-    // f(x) for x in args                                  => x
-    // f(x) for x in args if predicate(x)                  => x
-    // f(x) for [i, x] in enumerate(args) if predicate(x)  => x
-    std::shared_ptr<value> expression;
-    // f(x) for x in args                                  => args
-    // f(x) for x in args if predicate(x)                  => args
-    // f(x) for [i, x] in enumerate(args) if predicate(x)  => enumerate(args)
-    std::shared_ptr<value> source;
-    // f(x) for x in args                                  => f(x)
-    // f(x) for x in args if predicate(x)                  => [predicate(x) ? f(x) : <skip>]
-    // f(x) for x in args if predicate(x) else g(x)        => [predicate(x) ? f(x) : g(x)]
-    std::variant<std::shared_ptr<condition_value>, std::shared_ptr<value>> transforms;
+    virtual std::shared_ptr<value> next(const std::shared_ptr<name_lookup_context>& context) = 0;
+};
 
-    std::shared_ptr<value> next(const std::shared_ptr<name_lookup_context>& context);
-
-private:
-    generator_value(std::shared_ptr<value> expression, std::shared_ptr<value> source,
-                    std::shared_ptr<condition_value> transforms)
-        : expression(std::move(expression)),
-          source(std::move(source)),
-          transforms(std::move(transforms))
+struct native_generator_value : generator_value
+{
+    format_context& format(format_context& output) const override
     {
+        throw std::exception("Shouldn't be formatted");
     }
 
-    generator_value(std::shared_ptr<value> expression, std::shared_ptr<value> source,
-                    std::shared_ptr<value> transforms)
-        : expression(std::move(expression)),
-          source(std::move(source)),
-          transforms(std::move(transforms))
+    std::shared_ptr<value> evaluate(const std::shared_ptr<name_lookup_context>& context) override
     {
+        return shared_from_this();
     }
-
-    friend struct value;
 };
 
 struct sequence_value final : value, std::enable_shared_from_this<sequence_value>
@@ -874,22 +853,15 @@ struct sequence_bound_view final : std::enable_shared_from_this<sequence_bound_v
     void generate_next() const
     {
         ::std::visit(
-            overloaded
+            [this](auto&& ptr)
             {
-                [](const std::shared_ptr<const sequence_value>& ptr)
+                auto&& generator = ptr->generator;
+                if (generator)
                 {
-                    auto&& generator = ptr->generator;
-                    if (generator)
+                    const auto next = generator->next(context);
+                    if (next)
                     {
-                        throw std::exception("Const generation forbidden");
-                    }
-                },
-                [this](const std::shared_ptr<sequence_value>& ptr)
-                {
-                    auto&& generator = ptr->generator;
-                    if (generator)
-                    {
-                        ptr->values.push_back(generator->next(context));
+                        ptr->values.push_back(next);
                     }
                 }
             },
@@ -921,7 +893,7 @@ private:
 };
 
 template <bool Const>
-struct sequence_iterator_value final : value, std::enable_shared_from_this<sequence_iterator_value<Const>>
+struct sequence_iterator_value final
 {
     using value_type_const = std::conditional_t<Const, const value, value>;
     using value_type = std::shared_ptr<value_type_const>;
@@ -934,12 +906,6 @@ struct sequence_iterator_value final : value, std::enable_shared_from_this<seque
     std::shared_ptr<const sequence_bound_view> sequence_view;
     std::size_t index;
     bool end;
-
-    format_context& format(format_context& output) const override
-    {
-        DEBUG_ASSERT(!end, assert_module{});
-        return get()->format(output);
-    }
 
     decltype(auto) operator*() const
     {
@@ -969,44 +935,49 @@ struct sequence_iterator_value final : value, std::enable_shared_from_this<seque
         return *this;
     }
 
-    decltype(auto) operator++(int)
+    auto operator++(int)
     {
         auto ip = *this;
         ++*this;
         return ip;
     }
 
-    decltype(auto) operator--(int)
+    auto operator--(int)
     {
         auto ip = *this;
         --*this;
         return ip;
     }
 
-    std::shared_ptr<value> evaluate(const std::shared_ptr<name_lookup_context>& context) override
-    {
-        return shared_from_this();
-    }
+    ~sequence_iterator_value() = default;
+    sequence_iterator_value(const sequence_iterator_value& other) = default;
+    sequence_iterator_value(sequence_iterator_value&& other) noexcept = default;
+    sequence_iterator_value& operator=(const sequence_iterator_value& other) = default;
+    sequence_iterator_value& operator=(sequence_iterator_value&& other) noexcept = default;
 
 private:
     explicit sequence_iterator_value(std::shared_ptr<sequence_bound_view> sequence_value)
         : sequence_view(std::move(sequence_value)), index(0u), end(false)
     {
+        update_end_state();
     }
 
     explicit sequence_iterator_value(std::shared_ptr<const sequence_bound_view> sequence_value)
         : sequence_view(std::move(sequence_value)), index(0u), end(false)
     {
+        update_end_state();
     }
 
     explicit sequence_iterator_value(std::shared_ptr<sequence_bound_view> sequence_value, sequence_iterator_end_t)
         : sequence_view(std::move(sequence_value)), index(std::numeric_limits<decltype(index)>::max()), end(true)
     {
+        update_end_state();
     }
 
     explicit sequence_iterator_value(std::shared_ptr<const sequence_bound_view> sequence_value, sequence_iterator_end_t)
         : sequence_view(std::move(sequence_value)), index(std::numeric_limits<decltype(index)>::max()), end(true)
     {
+        update_end_state();
     }
 
     void update_end_state()
@@ -1048,6 +1019,63 @@ private:
 
     friend struct value;
     friend struct sequence_bound_view;
+};
+
+struct managed_generator_value final : generator_value
+{
+private:
+    struct sequence_cache
+    {
+        std::shared_ptr<name_lookup_context> context;
+        std::shared_ptr<value> source;
+        std::shared_ptr<sequence_bound_view> bound_view;
+        std::optional<sequence_iterator_value<false>> iterator;
+    };
+
+public:
+    // for x in args: f(x)                                  => x
+    // for x in args: f(x) if predicate(x)                  => x
+    // for [i, x] in enumerate(args): f(x) if predicate(x)  => [i, x]
+    std::shared_ptr<peg::Ast> expression;
+    // for x in args: f(x)                                  => args
+    // for x in args: f(x) if predicate(x)                  => args
+    // for [i, x] in enumerate(args): f(x) if predicate(x)  => enumerate(args)
+    std::shared_ptr<value> source;
+    // for x in args: f(x)                                  => f(x)
+    // for x in args: f(x) if predicate(x)                  => f(x) if predicate(x)
+    // for [i, x] in enumerate(args): f(x) if predicate(x)  => f(x) if predicate(x)
+    std::shared_ptr<value> transform;
+
+    std::shared_ptr<value> next(const std::shared_ptr<name_lookup_context>& context);
+
+    std::shared_ptr<value> evaluate(const std::shared_ptr<name_lookup_context>& context) override
+    {
+        evaluate_source(context);
+        return shared_from_this();
+    }
+
+    format_context& format(format_context& output) const override;
+
+private:
+    sequence_cache source_evaluated_;
+
+    void evaluate_source(const std::shared_ptr<name_lookup_context>& context)
+    {
+        source_evaluated_.context = context;
+        source_evaluated_.source = source->evaluate(context);
+        source_evaluated_.iterator = std::nullopt;
+        source_evaluated_.bound_view = nullptr;
+    }
+
+    managed_generator_value(std::shared_ptr<peg::Ast> expression, std::shared_ptr<value> source,
+        std::shared_ptr<value> transform)
+        : expression(std::move(expression)),
+        source(std::move(source)),
+        transform(std::move(transform))
+    {
+    }
+
+    friend struct value;
 };
 
 template <bool Const1, bool Const2>
@@ -1163,10 +1191,9 @@ struct variable final : value
 
     format_context& format(format_context& output) const override
     {
-        if (output.parameter_pack())
-            return output << name;
-
-        return output << "(var " << name << ")";
+        // Variables are stored only as part of binding expressions (function arguments/generator items)
+        DEBUG_ASSERT(output.parameter_pack(), assert_module{});
+        return output << name;
     }
 
 private:
@@ -1229,26 +1256,6 @@ void format_scope_define_impl(const format_context::scope& scope, T&& name)
 }
 
 void test_suite();
-
-std::shared_ptr<value> next(const std::shared_ptr<name_lookup_context>& context, const std::shared_ptr<value> source)
-{
-    if (auto it = std::dynamic_pointer_cast<sequence_iterator_value<true>>(source))
-    {
-        return ++*it, it;
-    }
-
-    if (auto it = std::dynamic_pointer_cast<sequence_iterator_value<false>>(source))
-    {
-        return ++*it, it;
-    }
-
-    if (auto it = std::dynamic_pointer_cast<generator_value>(source))
-    {
-        return it->next(context);
-    }
-
-    throw std::exception("Unknown next source");
-}
 
 auto len_iterator(const std::shared_ptr<name_lookup_context>& context)
 {
@@ -1403,24 +1410,78 @@ std::shared_ptr<value> accumulator_function_value::execute_impl(const std::share
     return create<integer_value>(result);
 }
 
-std::shared_ptr<value> generator_value::next(const std::shared_ptr<name_lookup_context>& context)
+std::shared_ptr<value> managed_generator_value::next(const std::shared_ptr<name_lookup_context>& context)
 {
     DEBUG_ASSERT(source, assert_module{});
 
-    while (true)
     {
-        auto item = ::next(context, source);
-        if (!item)
+        std::shared_ptr<value> source;
+
+        do
         {
-            return item;
+            if (source_evaluated_.context == context)
+            {
+                if (source_evaluated_.source)
+                {
+                    source = source_evaluated_.source;
+                }
+            }
+
+            if (!source)
+            {
+                this->evaluate_source(context);
+            }
+        }
+        while (!source);
+
+        if (source_evaluated_.iterator)
+        {
+            const auto same_source = ::std::visit(
+                [&source](auto&& ptr)
+                {
+                    return ptr == source;
+                },
+                source_evaluated_.iterator->sequence_view->sequence
+            );
+
+            if (!same_source)
+            {
+                source_evaluated_.iterator = std::nullopt;
+            }
         }
 
-        bind(context, expression, item);
+        if (!source_evaluated_.iterator)
+        {
+            if (const auto seq = std::static_pointer_cast<sequence_value>(source))
+            {
+                source_evaluated_.bound_view = seq->view(context);
+                source_evaluated_.iterator = source_evaluated_.bound_view->begin();
+            }
+        }
+    }
 
-        auto transformed = ::std::visit(
-            [&context](auto&& arg) { return arg->evaluate(context); },
-            transforms
-        );
+    DEBUG_ASSERT(source_evaluated_.iterator, assert_module{});
+
+    while (!source_evaluated_.iterator->end)
+    {
+        auto&& it = *source_evaluated_.iterator;
+        auto item = *it;
+        ++it;
+
+        if (!item)
+        {
+            source_evaluated_.iterator = source_evaluated_.bound_view->end();
+            return nullptr;
+        }
+
+        const std::deque<sequence_value::value_type> values{ item };
+        item = create<sequence_value>(values);
+
+        const auto local_context = context_base::create<name_lookup_context>(context);
+        const auto argument = parse_bind(local_context, expression);
+        ::bind(local_context, argument, item);
+
+        auto transformed = transform->evaluate(local_context);
 
         if (!transformed)
         {
@@ -1429,6 +1490,19 @@ std::shared_ptr<value> generator_value::next(const std::shared_ptr<name_lookup_c
 
         return transformed;
     }
+
+    return nullptr;
+}
+
+format_context& managed_generator_value::format(format_context& output) const
+{
+    const auto local_context = context_base::create<name_lookup_context>(output.name_lookup_context());
+
+    format_context::scope scope(output);
+    scope.set_name_lookup_context(local_context);
+
+    const auto argument = parse_bind(local_context, expression);
+    return output << "for " << format_scope(output, argument, parameter_pack = true, sequence_as_args = true) << " in " << source << ": " << transform;
 }
 
 static_assert(std::is_same_v<std::iterator_traits<sequence_bound_view::const_iterator>::difference_type, std::ptrdiff_t>);
@@ -1557,24 +1631,16 @@ format_context& managed_function_value::format(format_context& output) const
 
 std::shared_ptr<value> managed_function_value::materialize_arguments(const std::shared_ptr<name_lookup_context>& context) const
 {
-    auto args = parse_bind(context, argument);
-
-    if (!static_cast<bool>(std::dynamic_pointer_cast<sequence_value>(args)))
-    {
-        const std::deque<sequence_value::value_type> values{ args };
-        args = create<sequence_value>(values);
-    }
-
-    return args;
+    return parse_bind(context, argument);
 }
 
-std::shared_ptr<value> parse_bind(const std::shared_ptr<name_lookup_context>& name_lookup_context, const std::shared_ptr<peg::Ast>& ast)
+std::shared_ptr<value> parse_bind_impl(const std::shared_ptr<name_lookup_context>& name_lookup_context, const std::shared_ptr<peg::Ast>& ast)
 {
     auto&& node_name = ast->name;
 
     if (node_name == "expression" && ast->nodes.size() == 1)
     {
-        return parse_bind(name_lookup_context, ast->nodes.front());
+        return parse_bind_impl(name_lookup_context, ast->nodes.front());
     }
 
     if (node_name == "bind")
@@ -1591,7 +1657,7 @@ std::shared_ptr<value> parse_bind(const std::shared_ptr<name_lookup_context>& na
 
         DEBUG_ASSERT(inner_type == "tuple", assert_module{});
 
-        return parse_bind(name_lookup_context, nodes[0]);
+        return parse_bind_impl(name_lookup_context, nodes[0]);
     }
 
     if (node_name == "tuple")
@@ -1603,7 +1669,7 @@ std::shared_ptr<value> parse_bind(const std::shared_ptr<name_lookup_context>& na
 
         for (auto&& ast_argument : nodes)
         {
-            values.push_back(parse_bind(name_lookup_context, ast_argument));
+            values.push_back(parse_bind_impl(name_lookup_context, ast_argument));
         }
 
         return value::create<sequence_value>(values);
@@ -1612,6 +1678,19 @@ std::shared_ptr<value> parse_bind(const std::shared_ptr<name_lookup_context>& na
     DEBUG_UNREACHABLE(assert_module{});
 
     return nullptr;
+}
+
+std::shared_ptr<value> parse_bind(const std::shared_ptr<name_lookup_context>& context, const std::shared_ptr<peg::Ast>& ast)
+{
+    auto args = parse_bind_impl(context, ast);
+
+    if (!static_cast<bool>(std::dynamic_pointer_cast<sequence_value>(args)))
+    {
+        const std::deque<sequence_value::value_type> values{ args };
+        args = value::create<sequence_value>(values);
+    }
+
+    return args;
 }
 
 std::shared_ptr<value> parse_into_ast(const std::shared_ptr<peg::Ast>& ast)
@@ -1758,21 +1837,164 @@ std::shared_ptr<value> parse_into_ast(const std::shared_ptr<peg::Ast>& ast)
     if (node_name == "list")
     {
         auto&& nodes = ast->nodes;
-
-        std::deque<sequence_value::value_type> values;
-
-        for (auto&& ast_argument : nodes)
+        if (nodes.size() == 1 && nodes[0]->name == "expression" && nodes[0]->nodes.size() == 1 && nodes[0]->nodes[0]->name == "generator")
         {
-            values.push_back(parse_into_ast(ast_argument));
+            auto&& generator = std::static_pointer_cast<managed_generator_value>(parse_into_ast(nodes[0]->nodes[0]));
+            return value::create<sequence_value>(generator);
         }
+        else
+        {
+            std::deque<sequence_value::value_type> values;
 
-        return value::create<sequence_value>(values);
+            for (auto&& ast_argument : nodes)
+            {
+                values.push_back(parse_into_ast(ast_argument));
+            }
+
+            return value::create<sequence_value>(values);
+        }
+    }
+
+    if (node_name == "generator")
+    {
+        auto&& nodes = ast->nodes;
+        DEBUG_ASSERT(nodes.size() == 3, assert_module{});
+        DEBUG_ASSERT(nodes[0]->name == "bind", assert_module{});
+        DEBUG_ASSERT(nodes[1]->original_name == "expression", assert_module{});
+        DEBUG_ASSERT(nodes[2]->original_name == "expression", assert_module{});
+
+        auto&& source = parse_into_ast(nodes[1]);
+        auto&& transform = parse_into_ast(nodes[2]);
+
+        return value::create<managed_generator_value>(nodes[0], source, transform);
     }
 
     DEBUG_UNREACHABLE(assert_module{});
 
     return nullptr;
 }
+
+struct range_generator_value final : native_generator_value
+{
+    int64_t start;
+    int64_t stop;
+    int64_t step;
+    int64_t i = 0;
+
+    std::shared_ptr<value> next(const std::shared_ptr<name_lookup_context>& context) override
+    {
+        const auto result = start + step * i;
+        if (i < 0)
+        {
+            return nullptr;
+        }
+
+        if (step > 0 && result >= stop)
+        {
+            return nullptr;
+        }
+
+        if (step < 0 && result <= stop)
+        {
+            return nullptr;
+        }
+
+        ++i;
+
+        return create<integer_value>(result);
+    }
+
+private:
+    range_generator_value(const int64_t start, const int64_t stop, const int64_t step = 1)
+        : start(start),
+          stop(stop),
+          step(step)
+    {
+        if (step == 0)
+        {
+            throw std::domain_error("range step should be non-zero");
+        }
+    }
+
+    friend struct value;
+};
+
+struct range_function_value final : native_function_value
+{
+protected:
+    std::shared_ptr<value> execute_impl(const std::shared_ptr<name_lookup_context>& context,
+                                        std::shared_ptr<sequence_value> arguments) override
+    {
+        const auto args_view = arguments->view(context);
+        std::vector<std::shared_ptr<value>> args{args_view->begin(), args_view->end()};
+
+        if (args.empty())
+        {
+            throw std::domain_error("range should specify at least stop point");
+        }
+
+        int64_t start = 0, stop, step = 1;
+        switch (args.size())
+        {
+            case 1:
+            {
+                stop = evaluate_point(context, args[0]);
+                break;
+            }
+            case 2:
+            {
+                start = evaluate_point(context, args[0]);
+                stop = evaluate_point(context, args[1]);
+                break;
+            }
+            case 3:
+            {
+                start = evaluate_point(context, args[0]);
+                stop = evaluate_point(context, args[1]);
+                step = evaluate_point(context, args[2]);
+                break;
+            }
+            default:
+            {
+                throw std::domain_error("range expects no more than 3 arguments");
+            }
+        }
+
+        const auto generator = create<range_generator_value>(start, stop, step);
+
+        return create<sequence_value>(generator);
+    }
+
+    int64_t evaluate_point(const std::shared_ptr<name_lookup_context>& context,
+                                        const std::shared_ptr<value>& argument) const
+    {
+        if (!argument)
+        {
+            throw std::exception("point is nullptr");
+        }
+
+        const auto evaluated = argument->evaluate(context);
+
+        if (!evaluated)
+        {
+            throw std::exception("evaluated point is nullptr");
+        }
+
+        const auto integer = std::static_pointer_cast<integer_value>(evaluated);
+
+        if (!integer)
+        {
+            throw std::exception("evaluated point is not an integer");
+        }
+
+        return integer->value;
+    }
+
+private:
+    explicit range_function_value() = default;
+
+    friend struct value;
+};
 
 std::shared_ptr<name_lookup_context> create_context()
 {
@@ -1785,6 +2007,7 @@ std::shared_ptr<name_lookup_context> create_context()
     context->define("*")->value = value::create<mul_function_value>();
     context->define("/")->value = value::create<div_function_value>();
     context->define("%")->value = value::create<rem_function_value>();
+    context->define("range")->value = value::create<range_function_value>();
 
     return context;
 }
@@ -2073,7 +2296,7 @@ void test_suite()
             expect(eq(str(evaluated, false), "[(val 1), (val 2), (val 3)]"s));
             expect(eq(str(evaluated, true), "[(val 1), (val 2), (val 3)]"s));
         };
-        skip | "6"_test = [] {
+        "6"_test = [] {
             const auto ast = peg_parser(
                 R"(
 
