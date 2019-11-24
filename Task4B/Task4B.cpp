@@ -75,17 +75,24 @@ inline constexpr bool is_smart_pointer_v = is_smart_pointer<T>::value;
 constexpr char grammar[] =
     R"(
 
-expression <- _ (val / var / if / let / function / call / free_call) _
-val        <- '(' 'val' integer ')'
-var        <- '(' 'var' ident ')'
-if         <- '(' 'if' expression expression 'then' expression 'else' expression ')'
-let        <- '(' 'let' ident '=' expression 'in' expression ')'
-function   <- '(' 'function' bind expression ')'
-call       <- '(' 'call' expression expression ')'
-free_call  <- '(' ident expression* ')'
+expression   <- _ (val / var / if / let / function / call / free_call / list / generator) (ternary)? _
+val          <- '(' 'val' integer ')'
+var          <- '(' 'var' ident ')'
+if           <- '(' 'if' expression expression 'then' expression 'else' expression ')'
+let          <- '(' 'let' ident '=' expression 'in' expression ')'
+function     <- '(' 'function' bind expression ')'
+call         <- '(' 'call' expression expression ')'
+free_call    <- '(' ident expression* ')'
+list         <- '[' expression (',' expression)* ']'
+generator    <- 'for' bind 'in' expression ':' expression
+ternary      <- 'if' condition (ternary_else)?
+ternary_else <- 'else' expression
 
+condition  <- expression compare_op expression
+
+compare_op <- _ < '==' / '!=' / '<=' / '<' / '>=' / '>' > _
 bind       <- (tuple / ident)
-ident      <- _ < (([a-zA-Z] [a-zA-Z0-9]*) / '+' / '-' / '*' / '/') > _
+ident      <- _ < (([a-zA-Z] [a-zA-Z0-9]*) / '+' / '-' / '*' / '/' / '%') > _
 integer    <- sign number
 sign       <- _ < [-+]? > _
 number     <- _ < [0-9]+ > _
@@ -227,10 +234,10 @@ public:
 class format_context
 {
     std::ostream* stream_;
-    bool force_explicit_call_;
+    bool force_explicit_call_ = false;
 
 public:
-    bool force_explicit_call() const
+    [[nodiscard]] bool force_explicit_call() const
     {
         return force_explicit_call_;
     }
@@ -317,6 +324,12 @@ public:
         return scope ? scope->parameter_pack() : false;
     }
 
+    [[nodiscard]] bool sequence_as_args() const
+    {
+        const auto scope = current_scope();
+        return scope ? scope->sequence_as_args() : false;
+    }
+
     class scope final
     {
         format_context* const context_;
@@ -324,6 +337,7 @@ public:
         std::optional<std::int16_t> precedence_;
         bool wrap_in_brackets_ = false;
         std::optional<bool> parameter_pack_;
+        std::optional<bool> sequence_as_args_;
 
         [[nodiscard]] bool is_lower_precedence(const std::int16_t other) const
         {
@@ -425,6 +439,32 @@ public:
         void set_parameter_pack(const bool parameter_pack)
         {
             parameter_pack_ = parameter_pack;
+        }
+
+        [[nodiscard]] bool sequence_as_args() const
+        {
+            if (sequence_as_args_.has_value())
+            {
+                return sequence_as_args_.value();
+            }
+
+            auto* parent = parent_;
+            while (parent)
+            {
+                if (parent->sequence_as_args_.has_value())
+                {
+                    return parent->sequence_as_args_.value();
+                }
+
+                parent = parent->parent_;
+            }
+
+            return false;
+        }
+
+        void set_sequence_as_args(const bool sequence_as_args)
+        {
+            sequence_as_args_ = sequence_as_args;
         }
 
         scope(const scope& other) = delete;
@@ -674,8 +714,10 @@ struct managed_function_value final : function_value
         output << "(function ";
         {
             DEBUG_ASSERT(!output.parameter_pack(), assert_module{});
+            DEBUG_ASSERT(!output.sequence_as_args(), assert_module{});
             format_context::scope scope(output);
             scope.set_parameter_pack(true);
+            scope.set_sequence_as_args(true);
             output << argument;
         }
         return output << " " << body << ")";
@@ -957,6 +999,16 @@ decltype(auto) format_packed(format_context& output, T&& value)
     return output << std::forward<decltype(value)>(value);
 }
 
+template <typename T>
+decltype(auto) format_sequence_args(format_context& output, T&& value)
+{
+    DEBUG_ASSERT(!output.parameter_pack(), assert_module{});
+    format_context::scope scope(output);
+    scope.set_sequence_as_args(true);
+
+    return output << std::forward<decltype(value)>(value);
+}
+
 struct call_value final : value
 {
     std::shared_ptr<value> what;
@@ -971,7 +1023,7 @@ struct call_value final : value
         if (output.force_explicit_call() && len(arguments) == 1)
             output << "call ";
 
-        return output << format_packed(output, what) << ' ' << arguments << ')';
+        return output << format_packed(output, what) << ' ' << format_sequence_args(output, arguments) << ')';
     }
 
 private:
@@ -1399,16 +1451,24 @@ format_context& sequence_value::format(format_context& output) const
 {
     this->drain_generator();
 
+    const auto sequence_as_args = output.sequence_as_args();
+
+    if (!sequence_as_args)
+        output << '[';
+
     auto first = true;
     for (auto&& value : *this)
     {
         if (!first)
-            output << ' ';
+            output << (sequence_as_args ? " " : ", ");
         else
             first = false;
 
         output << value;
     }
+
+    if (!sequence_as_args)
+        output << ']';
 
     return output;
 }
@@ -1613,6 +1673,20 @@ std::shared_ptr<value> parse_into_ast(const std::shared_ptr<ast_tree_context>& a
 
             return value::create<call_value>(var, args);
         }
+    }
+
+    if (node_name == "list")
+    {
+        auto&& nodes = ast->nodes;
+
+        std::deque<sequence_value::value_type> values;
+
+        for (auto&& ast_argument : nodes)
+        {
+            values.push_back(parse_into_ast(ast_context, ast_argument));
+        }
+
+        return value::create<sequence_value>(values);
     }
 
     DEBUG_UNREACHABLE(assert_module{});
@@ -1889,6 +1963,85 @@ void test_suite()
 
             expect(eq(str(evaluated, false), "(val 46)"s));
             expect(eq(str(evaluated, true), "(val 46)"s));
+        };
+        "5"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+[(val 1), (val 2), (val 3)]
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "[(val 1), (val 2), (val 3)]"s));
+            expect(eq(str(evaluated, true), "[(val 1), (val 2), (val 3)]"s));
+        };
+        skip | "6"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+[for x in (range (val 1) (val 5)): (var x)]
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "[(val 1), (val 2), (val 3), (val 4)]"s));
+            expect(eq(str(evaluated, true), "[(val 1), (val 2), (val 3), (val 4)]"s));
+        };
+        skip | "7"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+[for x in (range (val 1) (val 10)): (var x) if (% (var x) (val 2)) == (val 0)]
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "[(val 2), (val 4), (val 6), (val 8)]"s));
+            expect(eq(str(evaluated, true), "[(val 2), (val 4), (val 6), (val 8)]"s));
+        };
+        "8"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+(let F = (function C (if (var C) (val 10) then (var C) else (add (var C) (call (var F) (add (val 1) (var C)))))) in
+    (call (var F) (val 0))
+)
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "(val 66)"s));
+            expect(eq(str(evaluated, true), "(val 66)"s));
+        };
+        "9"_test = [] {
+            const auto ast = peg_parser(
+                R"(
+
+(let F = (function C (if (var C) (val 10) then (var C) else (add (call (var F) (add (val 1) (var C))) (var C)))) in
+    (call (var F) (val 0))
+)
+
+                )"
+            );
+
+            const auto evaluated = evaluate(ast);
+            expect(static_cast<bool>(evaluated) == true_b);
+
+            expect(eq(str(evaluated, false), "(val 66)"s));
+            expect(eq(str(evaluated, true), "(val 66)"s));
         };
     };
 }
