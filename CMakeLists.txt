@@ -7,7 +7,8 @@ find_package (doctest CONFIG REQUIRED)
 #add_subdirectory ("Task1A")
 #add_subdirectory ("Task2A")
 #add_subdirectory ("Task3A")
-add_subdirectory ("Task4B")
+#add_subdirectory ("Task4B")
+add_subdirectory ("Task5")
 
 #[[
 include(PVS-Studio.cmake)
