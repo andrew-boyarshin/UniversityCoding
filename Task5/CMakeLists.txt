@@ -28,19 +28,28 @@ else ()
     message(FATAL_ERROR "Windows-only build!")
 endif()
 
-include(CheckCXXCompilerFlag)
-include(FindBoost)
+include (CheckCXXCompilerFlag)
+include (FindBoost)
 
-set(Boost_USE_STATIC_LIBS ON)
+set (Boost_USE_STATIC_LIBS ON)
 
-find_package(Boost 1.71 REQUIRED)
+find_package (Boost 1.71 REQUIRED)
+
+find_package (Threads)
+
+find_package (OpenSSL REQUIRED)
 
 add_executable (Task5
     "Task5.cpp"
     ${tbb_src}
 )
 
-target_link_libraries(Task5 ${Boost_LIBRARIES})
+target_link_libraries(Task5
+    ${Boost_LIBRARIES}
+    Crypt32.lib
+    Threads::Threads
+    OpenSSL::SSL
+    OpenSSL::Crypto)
 
 target_include_directories(Task5 PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -54,6 +63,7 @@ target_compile_definitions (Task5 PUBLIC
     __TBB_BUILD=1
     __TBB_DYNAMIC_LOAD_ENABLED=0
     __TBB_SOURCE_DIRECTLY_INCLUDED=1
+    DBG_MACRO_NO_WARNING
 )
 
 target_compile_features (Task5 PUBLIC cxx_std_20)

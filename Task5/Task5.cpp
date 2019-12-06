@@ -17,14 +17,20 @@
 #include <fmt/format.h>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <boost/beast/ssl.hpp>
 #include <boost/beast/version.hpp>
-#include <boost/asio/strand.hpp>
+#include <boost/asio/ssl/error.hpp>
+#include <boost/asio/ssl/stream.hpp>
+#include <boost/certify/extensions.hpp>
+#include <boost/certify/https_verification.hpp>
 #include <boost/algorithm/string.hpp>
 
 #define NOGDI
 
 #include "debug_assert.hpp"
 #include "ut.hpp"
+#include "plf_nanotimer.h"
+#include "dbg.h"
 #include <regex>
 
 // cppppack: embed point
@@ -124,187 +130,183 @@ parsed_uri parse_uri(const std::string& url)
     return result;
 }
 
-std::vector<std::thread> threads;
-tbb::concurrent_unordered_set<std::string> fetched;
-moodycamel::ConcurrentQueue<std::string> queue;
-std::atomic<std::uint64_t> found_pages(0);
-std::atomic<std::uint64_t> processed_pages(0);
-
-namespace beast = boost::beast; // from <boost/beast.hpp>
-namespace http = beast::http; // from <boost/beast/http.hpp>
-namespace net = boost::asio; // from <boost/asio.hpp>
-using tcp = boost::asio::ip::tcp; // from <boost/asio/ip/tcp.hpp>
-
-// Report a failure
-void
-fail(beast::error_code ec, char const* what)
+struct job_context
 {
-    std::cerr << what << ": " << ec.message() << "\n";
-}
+    tbb::concurrent_unordered_set<std::string> fetched;
+    moodycamel::ConcurrentQueue<std::string> queue;
+    std::atomic<std::uint64_t> found_pages;
+    std::atomic<std::uint64_t> processed_pages;
 
-// Performs an HTTP GET and prints the response
-class session : public std::enable_shared_from_this<session>
-{
-    tcp::resolver resolver_;
-    beast::tcp_stream stream_;
-    beast::flat_buffer buffer_; // (Must persist between reads)
-    http::request<http::empty_body> req_;
-    http::response<http::string_body> res_;
-
-public:
-    // Objects are constructed with a strand to
-    // ensure that handlers do not execute concurrently.
-    explicit session(net::io_context& ioc)
-        : resolver_(net::make_strand(ioc))
-          , stream_(net::make_strand(ioc))
+    explicit job_context() : found_pages(0), processed_pages(0)
     {
     }
 
-    // Start the asynchronous operation
-    void run(
-        const std::string& url
-    )
+    ~job_context() = default;
+    job_context(const job_context& other) = delete;
+    job_context(job_context&& other) noexcept = delete;
+    job_context& operator=(const job_context& other) = delete;
+    job_context& operator=(job_context&& other) noexcept = delete;
+
+    template <typename T>
+    void enqueue(T&& url)
     {
-        const auto parsed_url = parse_uri(url);
-
-        // Set up an HTTP GET request message
-        req_.method(http::verb::get);
-        req_.target(parsed_url.resource);
-        req_.set(http::field::host, parsed_url.domain);
-        req_.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
-
-        // Look up the domain name
-        resolver_.async_resolve(
-            parsed_url.domain,
-            parsed_url.protocol,
-            beast::bind_front_handler(
-                &session::on_resolve,
-                shared_from_this()));
-    }
-
-    void on_resolve(
-        beast::error_code ec,
-        tcp::resolver::results_type results
-    )
-    {
-        if (ec)
-            return fail(ec, "resolve");
-
-        // Set a timeout on the operation
-        stream_.expires_after(std::chrono::seconds(30));
-
-        // Make the connection on the IP address we get from a lookup
-        stream_.async_connect(
-            results,
-            beast::bind_front_handler(
-                &session::on_connect,
-                shared_from_this()));
-    }
-
-    void on_connect(beast::error_code ec, tcp::resolver::results_type::endpoint_type)
-    {
-        if (ec)
-            return fail(ec, "connect");
-
-        // Set a timeout on the operation
-        stream_.expires_after(std::chrono::seconds(30));
-
-        // Send the HTTP request to the remote host
-        http::async_write(stream_, req_,
-                          beast::bind_front_handler(
-                              &session::on_write,
-                              shared_from_this()));
-    }
-
-    void on_write(
-        beast::error_code ec,
-        std::size_t bytes_transferred
-    )
-    {
-        boost::ignore_unused(bytes_transferred);
-
-        if (ec)
-            return fail(ec, "write");
-
-        // Receive the HTTP response
-        http::async_read(stream_, buffer_, res_,
-                         beast::bind_front_handler(
-                             &session::on_read,
-                             shared_from_this()));
-    }
-
-    void on_read(
-        beast::error_code ec,
-        std::size_t bytes_transferred
-    )
-    {
-        boost::ignore_unused(bytes_transferred);
-
-        if (ec)
-            return fail(ec, "read");
-
-        // Write the message to standard out
-        std::cout << res_ << std::endl;
-
-        // Gracefully close the socket
-        stream_.socket().shutdown(tcp::socket::shutdown_both, ec);
-
-        // not_connected happens sometimes so don't bother reporting it.
-        if (ec && ec != beast::errc::not_connected)
-            return fail(ec, "shutdown");
-
-        // If we get here then the connection is closed gracefully
+        auto [it, inserted] = fetched.insert(url);
+        if (inserted)
+        {
+            found_pages.fetch_add(1, std::memory_order_seq_cst);
+            queue.enqueue(url);
+        }
     }
 };
 
-void worker_thread()
-{
-    std::string item;
-    for (int j = 0; j != 20; ++j)
-    {
-        if (queue.try_dequeue(item))
-        {
-            //++dequeued[item];
-        }
-    }
+constexpr auto beast_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:72.0) Gecko/20100101 Firefox/72.0";
+constexpr auto beast_accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8";
+constexpr auto beast_accept_language = "en-US,en;q=0.5";
 
-    for (int j = 0; j != 10; ++j)
-    {
-        queue.enqueue("Test");
-    }
+namespace beast = boost::beast;
+namespace asio = boost::asio;
+
+auto is_ok(const beast::error_code& ec)
+{
+    // not_connected happens sometimes, so don't bother reporting it.
+    return !ec || ec == beast::errc::not_connected;
 }
 
+void worker_thread(job_context& context)
+{
+    // The io_context is required for all I/O
+    asio::io_context ioc;
+
+    // The SSL context is required, and holds certificates
+    asio::ssl::context ctx(asio::ssl::context::tlsv12_client);
+
+    // Verify the remote server's certificate
+    ctx.set_verify_mode(asio::ssl::context::verify_peer);
+    ctx.set_default_verify_paths();
+    boost::certify::enable_native_https_server_verification(ctx);
+
+    // These objects perform our I/O
+    asio::ip::tcp::resolver resolver(ioc);
+    asio::ssl::stream<beast::tcp_stream> stream(ioc, ctx);
+    std::string url;
+
+    bool items_left;
+    do
+    {
+        // It's important to fence (if the producers have finished) *before* dequeueing
+        const auto found = context.found_pages.load(std::memory_order_acquire);
+        const auto processed = context.processed_pages.load(std::memory_order_acquire);
+        items_left = found != processed;
+        while (context.queue.try_dequeue(url))
+        {
+            items_left = true;
+
+            // This buffer is used for reading and must be persisted
+            beast::flat_buffer buffer;
+            beast::error_code ec;
+            auto status = beast::http::status::unknown;
+            do
+            {
+                if (status == beast::http::status::moved_permanently)
+                {
+                    // todo: handle redirect
+                }
+
+                const auto parsed_url = parse_uri(url);
+
+                dbg(parsed_url.protocol);
+                dbg(parsed_url.port);
+                dbg(parsed_url.domain);
+                dbg(parsed_url.resource);
+                dbg(parsed_url.query);
+
+                boost::certify::set_server_hostname(stream, parsed_url.domain);
+                boost::certify::sni_hostname(stream, parsed_url.domain);
+
+                // Look up the domain name
+                auto const results = resolver.resolve(parsed_url.domain, parsed_url.protocol);
+
+                // Make the connection on the IP address we get from a lookup
+                get_lowest_layer(stream).connect(results);
+                stream.handshake(asio::ssl::stream_base::client);
+
+                // Set up an HTTP GET request message
+                beast::http::request<beast::http::string_body> req;
+                req.method(beast::http::verb::get);
+                req.target(parsed_url.resource);
+                req.set(beast::http::field::host, parsed_url.domain);
+                req.set(beast::http::field::accept, beast_accept);
+                req.set(beast::http::field::accept_language, beast_accept_language);
+                req.set(beast::http::field::user_agent, beast_user_agent);
+
+                // Send the HTTP request to the remote host
+                beast::http::write(stream, req);
+
+                // Declare a container to hold the response
+                beast::http::response<beast::http::dynamic_body> res;
+                buffer.clear();
+
+                // Receive the HTTP response
+                beast::http::read(stream, buffer, res, ec);
+            }
+            while (is_ok(ec));
+
+            // todo: access body ( that was already disposed :( )
+            //dbg(res.base());
+
+            // Gracefully close the socket
+            stream.shutdown(ec);
+
+            // If we get here then the connection is closed gracefully
+            context.processed_pages.fetch_add(1, std::memory_order_release);
+        }
+    }
+    while (items_left);
+}
 
 void test_suite();
 
-template <typename Input, typename Output>
-void execute(Input&& in_file, Output&& out_file)
+struct execute_result final
 {
+    std::uint64_t pages_crawled = 0;
+    plf::nanotimer timer;
+    explicit execute_result() = default;
+    ~execute_result() = default;
+    execute_result(const execute_result& other) = delete;
+    execute_result(execute_result&& other) noexcept = default;
+    execute_result& operator=(const execute_result& other) = delete;
+    execute_result& operator=(execute_result&& other) noexcept = default;
+};
+
+template <typename Input>
+execute_result execute(Input&& in_file)
+{
+    std::vector<std::thread> threads;
+    job_context context;
+    execute_result result;
+
+    result.timer.start();
+
     std::string start_url;
     std::size_t jobs;
     DEBUG_ASSERT(scn::scan(in_file, "{} {}", start_url, jobs), assert_module{});
 
-    std::uint64_t pages = 1;
-    std::uint64_t time_ms = 100;
-    if constexpr (std::is_pointer_v<std::remove_cvref_t<Output>>)
+    context.enqueue(start_url);
+
+    for (decltype(jobs) i = 0; i < jobs; ++i)
     {
-        fmt::print(out_file, FMT_STRING("{} {}"), pages, time_ms);
-    }
-    else
-    {
-        fmt::format_to(out_file, FMT_STRING("{} {}"), pages, time_ms);
+        threads.emplace_back(worker_thread, std::ref(context));
     }
 
-    // The io_context is required for all I/O
-    net::io_context ioc;
+    for (auto&& thread : threads)
+    {
+        thread.join();
+    }
 
-    auto ptr = std::make_shared<session>(ioc);
-    // Launch the asynchronous operation
-    ptr->run("https://google.com");
+    result.pages_crawled = context.processed_pages.load(std::memory_order_seq_cst);
+    DEBUG_ASSERT(result.pages_crawled == context.found_pages.load(std::memory_order_seq_cst), assert_module{});
 
-    // Run the I/O service. The call will return when
-    // the get operation is complete.
-    ioc.run();
+    return result;
 }
 
 thread_local const auto close = [](auto fd) { std::fclose(fd); };
@@ -328,26 +330,41 @@ int main() // NOLINT(bugprone-exception-escape)
 
     scn::file fin(in_file.get());
 
-    execute(fin, out_file.get());
+    auto result = execute(fin);
+
+    fmt::print(out_file.get(), FMT_STRING("{} {}"), result.pages_crawled, result.timer.get_elapsed_us());
 
     return 0;
 }
 
 #pragma warning( push )
 #pragma warning( disable : 26444 )
+template <typename T>
+void fetch(T&& url)
+{
+    using namespace boost::ut;
+    auto result = execute(scn::make_view(url));
+    expect(result.pages_crawled == 1_ul);
+    const auto elapsed_ns = result.timer.get_elapsed_ns();
+    expect(elapsed_ns > 0._d);
+    boost::ut::log << elapsed_ns;
+};
+
 void test_suite()
 {
     using namespace boost::ut;
     using namespace std::literals;
 
-    "examples"_test = []
+    "online"_test = []
     {
-        "1"_test = []
+        "google.com"_test = []
         {
-            fmt::memory_buffer buf;
-            auto input = "https://google.com 1"s;
-            execute(scn::make_view(input), buf);
-            expect(eq(fmt::to_string(buf), "1 100"sv));
+            fetch("https://google.com 1"s);
+        };
+
+        "ya.ru"_test = []
+        {
+            fetch("https://ya.ru 1"s);
         };
     };
 }
