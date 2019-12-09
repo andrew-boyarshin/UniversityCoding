@@ -26,12 +26,20 @@
 #include <boost/algorithm/string.hpp>
 
 #define NOGDI
+#define USE_CTRE 0
+#define USE_STD_REGEX 1
 
+#include "magic_enum.hpp"
 #include "debug_assert.hpp"
 #include "ut.hpp"
 #include "plf_nanotimer.h"
 #include "dbg.h"
+#include "hs.h"
+#if USE_STD_REGEX
 #include <regex>
+#elif USE_CTRE
+#include "ctre.hpp"
+#endif
 
 // cppppack: embed point
 
@@ -88,16 +96,21 @@ struct overloaded : Ts...
 template <class... Ts>
 overloaded(Ts ...) -> overloaded<Ts...>;
 
-// Note: only "http", "https", "ws", and "wss" protocols are supported
-static const std::regex parse_url{
-    R"((([httpsw]{2,5})://)?([^/ :]+)(:(\d+))?(/([^ ?]+)?)?/?\??([^/ ]+\=[^/ ]+)?)",
-    std::regex_constants::ECMAScript | std::regex_constants::icase | std::regex_constants::optimize
-};
+namespace beast = boost::beast;
+namespace asio = boost::asio;
+
+namespace magic_enum {
+    template <>
+    struct enum_range<beast::http::status> {
+        static constexpr int min = 0;
+        static constexpr int max = 600;
+    };
+}
 
 struct parsed_uri final
 {
     std::string protocol;
-    std::string domain; // only domain must be present
+    std::string domain;
     std::string port;
     std::string resource;
     std::string query; // everything after '?', possibly nothing
@@ -109,26 +122,56 @@ struct parsed_uri final
     parsed_uri& operator=(parsed_uri&& other) noexcept = default;
 };
 
-parsed_uri parse_uri(const std::string& url)
-{
-    parsed_uri result;
-    auto value_or = [](const std::string& value, std::string&& fallback) -> std::string
-    {
-        return (value.empty() ? fallback : value);
-    };
-    std::smatch match;
-    if (std::regex_match(url, match, parse_url) && match.size() == 9)
-    {
-        result.protocol = value_or(boost::algorithm::to_lower_copy(std::string(match[2])), "http");
-        result.domain = match[3];
-        const auto is_secure_protocol = result.protocol == "https" || result.protocol == "wss";
-        result.port = value_or(match[5], is_secure_protocol ? "443" : "80");
-        result.resource = value_or(match[6], "/");
-        result.query = match[8];
-        assert(!result.domain.empty());
-    }
-    return result;
+constexpr char regex_a_pattern[] = R"R(<\s*a[^>]*href\s*=\s*"(.+?)"[^>]*>)R";
+constexpr char regex_url_pattern[] = R"R((([filehttpsw]{2,5})://)?([^/ :]+)(:(\d+))?(/([^ ?]+)?)?/?\??(\S+)?)R";
+
+#if USE_STD_REGEX
+static const std::regex ctre_a_pattern{
+    regex_a_pattern,
+    std::regex_constants::icase | std::regex_constants::optimize
+};
+static const std::regex ctre_url_pattern{
+    regex_url_pattern,
+    std::regex_constants::icase | std::regex_constants::optimize
+};
+
+auto ctre_a_match(std::string_view sv) noexcept {
+    std::match_results<decltype(sv)::const_iterator> match;
+    std::regex_match(sv.cbegin(), sv.cend(), match, ctre_a_pattern);
+    return match;
 }
+
+auto ctre_url_match(std::string_view sv) noexcept {
+    std::match_results<decltype(sv)::const_iterator> match;
+    std::regex_match(sv.cbegin(), sv.cend(), match, ctre_url_pattern);
+    return match;
+}
+
+template <uint32_t Index, typename T>
+auto value_or(T&& match, std::string_view fallback) -> std::string_view
+{
+    auto&& value = match.get<Index>();
+    return value ? value.to_view() : fallback;
+}
+#elif USE_CTRE
+static constexpr auto ctre_a_pattern = ctll::fixed_string{  };
+static constexpr auto ctre_url_pattern = ctll::fixed_string{  };
+
+constexpr auto ctre_a_match(std::string_view sv) noexcept {
+    return ctre::match<ctre_a_pattern>(sv);
+}
+
+constexpr auto ctre_url_match(std::string_view sv) noexcept {
+    return ctre::match<ctre_url_pattern>(sv);
+}
+
+template <uint32_t Index, typename T>
+auto value_or(T&& match, std::string_view fallback) -> std::string_view
+{
+    auto&& value = match.get<Index>();
+    return value ? value.to_view() : fallback;
+}
+#endif
 
 struct job_context
 {
@@ -163,13 +206,196 @@ constexpr auto beast_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:
 constexpr auto beast_accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8";
 constexpr auto beast_accept_language = "en-US,en;q=0.5";
 
-namespace beast = boost::beast;
-namespace asio = boost::asio;
+hs_database_t* database = nullptr;
+hs_scratch_t* scratch_prototype = nullptr;
 
 auto is_ok(const beast::error_code& ec)
 {
     // not_connected happens sometimes, so don't bother reporting it.
     return !ec || ec == beast::errc::not_connected;
+}
+
+struct hs_my_context final
+{
+    std::deque<std::string_view>* matches;
+    std::string_view data;
+
+    hs_my_context(std::deque<std::string_view>& matches,
+                  std::string_view data)
+        : matches(&matches),
+          data(std::move(data))
+    {
+    }
+
+    ~hs_my_context() = default;
+
+    hs_my_context(const hs_my_context& other) = delete;
+    hs_my_context(hs_my_context&& other) noexcept = delete;
+    hs_my_context& operator=(const hs_my_context& other) = delete;
+    hs_my_context& operator=(hs_my_context&& other) noexcept = delete;
+};
+
+int hs_scan_handler(unsigned int, unsigned long long from, unsigned long long to, unsigned int, void* context)
+{
+    auto* const my_context = static_cast<hs_my_context*>(context);
+
+    my_context->matches->push_back(my_context->data.substr(from, to - from));
+
+    my_context->data.remove_prefix(to);
+
+    return 1;
+}
+
+std::optional<parsed_uri> parse_uri(const std::string& url)
+{
+    if (auto m = ctre_url_match(url))
+    {
+        parsed_uri result;
+
+        result.protocol = value_or<2>(m, "http");
+        boost::algorithm::to_lower(result.protocol);
+        result.domain = value_or<3>(m, "");
+        const auto is_secure_protocol = result.protocol == "https" || result.protocol == "wss";
+        result.port = value_or<5>(m, is_secure_protocol ? "443" : "80");
+        result.resource = value_or<6>(m, "/");
+        result.query = value_or<8>(m, "");
+        DEBUG_ASSERT(!result.domain.empty(), assert_module{});
+
+        return result;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::string> parse_a(const std::string_view& a)
+{
+    if (auto m = ctre_a_match(a))
+    {
+        std::string result;
+        result = value_or<1>(m, "");
+        if (result.empty())
+        {
+            return std::nullopt;
+        }
+
+        return result;
+    }
+
+    return std::nullopt;
+}
+
+void fetch_web(job_context& context, asio::ip::tcp::resolver& resolver, asio::ssl::stream<beast::tcp_stream>& stream, std::string url, hs_scratch_t* scratch)
+{
+    beast::error_code ec;
+    // This buffer is used for reading and must be persisted
+    beast::flat_buffer buffer;
+    do
+    {
+        const auto parsed_url_opt = parse_uri(url);
+
+        if (!parsed_url_opt)
+        {
+            fmt::print(FMT_STRING("Failed to parse \"{}\" as URL\n"), url);
+            return;
+        }
+
+        const auto& parsed_url = parsed_url_opt.value();
+
+        dbg(parsed_url.protocol);
+        dbg(parsed_url.port);
+        dbg(parsed_url.domain);
+        dbg(parsed_url.resource);
+        dbg(parsed_url.query);
+
+        boost::certify::set_server_hostname(stream, parsed_url.domain);
+        boost::certify::sni_hostname(stream, parsed_url.domain);
+
+        // Look up the domain name
+        auto const results = resolver.resolve(parsed_url.domain, parsed_url.protocol);
+
+        // Make the connection on the IP address we get from a lookup
+        get_lowest_layer(stream).connect(results);
+        stream.handshake(asio::ssl::stream_base::client);
+
+        // Set up an HTTP GET request message
+        beast::http::request<beast::http::string_body> req;
+        req.method(beast::http::verb::get);
+        req.target(parsed_url.resource);
+        req.set(beast::http::field::host, parsed_url.domain);
+        req.set(beast::http::field::accept, beast_accept);
+        req.set(beast::http::field::accept_language, beast_accept_language);
+        req.set(beast::http::field::user_agent, beast_user_agent);
+
+        // Send the HTTP request to the remote host
+        beast::http::write(stream, req);
+
+        // Declare a container to hold the response
+        beast::http::response<beast::http::string_body> res;
+        buffer.clear();
+
+        // Receive the HTTP response
+        beast::http::read(stream, buffer, res, ec);
+
+        auto result = res.base().result();
+        switch (result)
+        {
+            case beast::http::status::ok:
+            {
+                auto& body = res.body();
+                std::deque<std::string_view> matches;
+
+                hs_my_context my_context{matches, body.data()};
+
+                while (!my_context.data.empty())
+                {
+                    const auto ret = hs_scan(
+                        database, my_context.data.data(), my_context.data.length(), 0, scratch,
+                        hs_scan_handler, &my_context
+                    );
+
+                    if (ret != HS_SUCCESS && ret != HS_SCAN_TERMINATED)
+                    {
+                        fmt::print(FMT_STRING("ERROR: Unable to scan input buffer. Exiting.\n"));
+                        return;
+                    }
+
+                    if (ret == HS_SUCCESS)
+                    {
+                        break;
+                    }
+                }
+
+                for (auto && match : matches)
+                {
+                    auto a_opt = parse_a(match);
+                    if (!a_opt)
+                    {
+                        fmt::print(FMT_STRING("* \"{}\" couldn't be parsed as <A /> element\n"), match);
+                        continue;
+                    }
+
+                    context.enqueue(a_opt.value());
+                }
+
+                return;
+            }
+            case beast::http::status::moved_permanently:
+            case beast::http::status::permanent_redirect:
+            case beast::http::status::temporary_redirect:
+            {
+                const auto location = res.base().at(beast::http::field::location);
+                url.assign(location.data(), location.size());
+                break;
+            }
+            default:
+            {
+                std::string v{magic_enum::enum_name<beast::http::status>(result)};
+                dbg(v);
+                return;
+            }
+        }
+    }
+    while (is_ok(ec));
 }
 
 void worker_thread(job_context& context)
@@ -187,7 +413,14 @@ void worker_thread(job_context& context)
 
     // These objects perform our I/O
     asio::ip::tcp::resolver resolver(ioc);
-    asio::ssl::stream<beast::tcp_stream> stream(ioc, ctx);
+
+    hs_scratch_t* scratch_thread = nullptr;
+
+    if (hs_clone_scratch(scratch_prototype, &scratch_thread) != HS_SUCCESS) {
+        fmt::print(FMT_STRING("hs_clone_scratch failed!\n"));
+        std::exit(1);
+    }
+
     std::string url;
 
     bool items_left;
@@ -201,59 +434,11 @@ void worker_thread(job_context& context)
         {
             items_left = true;
 
-            // This buffer is used for reading and must be persisted
-            beast::flat_buffer buffer;
+            asio::ssl::stream<beast::tcp_stream> stream(ioc, ctx);
+
+            fetch_web(context, resolver, stream, url, scratch_thread);
+
             beast::error_code ec;
-            auto status = beast::http::status::unknown;
-            do
-            {
-                if (status == beast::http::status::moved_permanently)
-                {
-                    // todo: handle redirect
-                }
-
-                const auto parsed_url = parse_uri(url);
-
-                dbg(parsed_url.protocol);
-                dbg(parsed_url.port);
-                dbg(parsed_url.domain);
-                dbg(parsed_url.resource);
-                dbg(parsed_url.query);
-
-                boost::certify::set_server_hostname(stream, parsed_url.domain);
-                boost::certify::sni_hostname(stream, parsed_url.domain);
-
-                // Look up the domain name
-                auto const results = resolver.resolve(parsed_url.domain, parsed_url.protocol);
-
-                // Make the connection on the IP address we get from a lookup
-                get_lowest_layer(stream).connect(results);
-                stream.handshake(asio::ssl::stream_base::client);
-
-                // Set up an HTTP GET request message
-                beast::http::request<beast::http::string_body> req;
-                req.method(beast::http::verb::get);
-                req.target(parsed_url.resource);
-                req.set(beast::http::field::host, parsed_url.domain);
-                req.set(beast::http::field::accept, beast_accept);
-                req.set(beast::http::field::accept_language, beast_accept_language);
-                req.set(beast::http::field::user_agent, beast_user_agent);
-
-                // Send the HTTP request to the remote host
-                beast::http::write(stream, req);
-
-                // Declare a container to hold the response
-                beast::http::response<beast::http::dynamic_body> res;
-                buffer.clear();
-
-                // Receive the HTTP response
-                beast::http::read(stream, buffer, res, ec);
-            }
-            while (is_ok(ec));
-
-            // todo: access body ( that was already disposed :( )
-            //dbg(res.base());
-
             // Gracefully close the socket
             stream.shutdown(ec);
 
@@ -262,6 +447,8 @@ void worker_thread(job_context& context)
         }
     }
     while (items_left);
+
+    hs_free_scratch(scratch_thread);
 }
 
 void test_suite();
@@ -278,9 +465,36 @@ struct execute_result final
     execute_result& operator=(execute_result&& other) noexcept = default;
 };
 
+void initialize_regex()
+{
+    hs_compile_error_t* compile_err;
+    if (hs_compile(R"(<\s*a[^>]*href\s*=\s*".+"[^>]*>)", HS_FLAG_CASELESS | HS_FLAG_SOM_LEFTMOST, HS_MODE_BLOCK, nullptr, &database, &compile_err) != HS_SUCCESS) {
+        fmt::print(FMT_STRING("ERROR: Unable to compile pattern: {}\n"), compile_err->message);
+        hs_free_compile_error(compile_err);
+        std::exit(1);
+    }
+
+    if (hs_alloc_scratch(database, &scratch_prototype) != HS_SUCCESS) {
+        fmt::print(FMT_STRING("ERROR: Unable to allocate scratch space. Exiting.\n"));
+        hs_free_database(database);
+        std::exit(1);
+    }
+}
+
+void destruct_regex()
+{
+    hs_free_scratch(scratch_prototype);
+    scratch_prototype = nullptr;
+    hs_free_database(database);
+    database = nullptr;
+}
+
 template <typename Input>
 execute_result execute(Input&& in_file)
 {
+    sr::scope_exit v{ destruct_regex };
+    initialize_regex();
+
     std::vector<std::thread> threads;
     job_context context;
     execute_result result;
