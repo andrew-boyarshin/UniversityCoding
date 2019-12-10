@@ -2,7 +2,6 @@
 #include <vector>
 #include <memory>
 #include <functional>
-#include <unordered_set>
 #include <deque>
 #include <variant>
 #include <charconv>
@@ -10,6 +9,7 @@
 #include <compare>
 #include <string_view>
 #include <string>
+#include <filesystem>
 #include "unique_resource.h"
 #include "concurrentqueue.h"
 #include "tbb/concurrent_unordered_set.h"
@@ -98,6 +98,7 @@ overloaded(Ts ...) -> overloaded<Ts...>;
 
 namespace beast = boost::beast;
 namespace asio = boost::asio;
+namespace fs = std::filesystem;
 
 namespace magic_enum {
     template <>
@@ -107,23 +108,64 @@ namespace magic_enum {
     };
 }
 
-struct parsed_uri final
+struct parsed_url final
 {
-    std::string protocol;
+private:
+    std::string protocol_;
+
+public:
+    [[nodiscard]] const std::string& protocol() const
+    {
+        return protocol_;
+    }
+
+    [[nodiscard]] std::string& protocol()
+    {
+        return protocol_;
+    }
+
+    template <typename T>
+    void protocol(T&& protocol)
+    {
+        protocol_ = protocol;
+        boost::algorithm::to_lower(protocol_);
+
+        deduce_port(false);
+    }
+
+    void deduce_port(const bool force = false)
+    {
+        if (!port.empty() && !force)
+        {
+            return;
+        }
+
+        if (protocol_ == "http" || protocol_ == "ws")
+        {
+            port = "80";
+        }
+        if (protocol_ == "https" || protocol_ == "wss")
+        {
+            port = "443";
+        }
+    }
+
+    std::string root;
     std::string domain;
     std::string port;
-    std::string resource;
-    std::string query; // everything after '?', possibly nothing
-    explicit parsed_uri() = default;
-    ~parsed_uri() = default;
-    parsed_uri(const parsed_uri& other) = default;
-    parsed_uri(parsed_uri&& other) noexcept = default;
-    parsed_uri& operator=(const parsed_uri& other) = default;
-    parsed_uri& operator=(parsed_uri&& other) noexcept = default;
+    std::string target;
+
+    explicit parsed_url() = default;
+    ~parsed_url() = default;
+    parsed_url(const parsed_url& other) = default;
+    parsed_url(parsed_url&& other) noexcept = default;
+    parsed_url& operator=(const parsed_url& other) = default;
+    parsed_url& operator=(parsed_url&& other) noexcept = default;
 };
 
+constexpr char hscan_a_pattern[] = R"R(<\s*a[^>]*href\s*=\s*".+"[^>]*>)R";
 constexpr char regex_a_pattern[] = R"R(<\s*a[^>]*href\s*=\s*"(.+?)"[^>]*>)R";
-constexpr char regex_url_pattern[] = R"R((([filehttpsw]{2,5})://)?([^/ :]+)(:(\d+))?(/([^ ?]+)?)?/?\??(\S+)?)R";
+constexpr char regex_url_pattern[] = R"R(^(([filehttpsw]{2,5}):)?(/+)(([^\s:/?#\[\]!$&'\(\)*+,;=]+\.[^\s:/?#\[\]!$&'\(\)*+,;=]+)(:(\d+))?)?([^\s?]*?(\?\S*)?)$)R";
 
 #if USE_STD_REGEX
 static const std::regex ctre_a_pattern{
@@ -135,23 +177,33 @@ static const std::regex ctre_url_pattern{
     std::regex_constants::icase | std::regex_constants::optimize
 };
 
-auto ctre_a_match(std::string_view sv) noexcept {
+auto regex_match(std::string_view sv, const std::regex& pattern) -> std::optional<std::match_results<decltype(sv)::const_iterator>>
+{
     std::match_results<decltype(sv)::const_iterator> match;
-    std::regex_match(sv.cbegin(), sv.cend(), match, ctre_a_pattern);
-    return match;
+
+    if (std::regex_match(sv.cbegin(), sv.cend(), match, pattern))
+    {
+        return match;
+    }
+
+    return std::nullopt;
 }
 
-auto ctre_url_match(std::string_view sv) noexcept {
-    std::match_results<decltype(sv)::const_iterator> match;
-    std::regex_match(sv.cbegin(), sv.cend(), match, ctre_url_pattern);
-    return match;
+auto ctre_a_match(std::string_view sv)
+{
+    return regex_match(sv, ctre_a_pattern);
+}
+
+auto ctre_url_match(std::string_view sv)
+{
+    return regex_match(sv, ctre_url_pattern);
 }
 
 template <uint32_t Index, typename T>
-auto value_or(T&& match, std::string_view fallback) -> std::string_view
+auto value_or(T&& match, std::string_view fallback) -> std::string
 {
-    auto&& value = match.get<Index>();
-    return value ? value.to_view() : fallback;
+    auto&& value = match[Index];
+    return std::string{value.matched ? value.str() : fallback};
 }
 #elif USE_CTRE
 static constexpr auto ctre_a_pattern = ctll::fixed_string{  };
@@ -215,6 +267,17 @@ auto is_ok(const beast::error_code& ec)
     return !ec || ec == beast::errc::not_connected;
 }
 
+bool verify_code(const beast::error_code& ec)
+{
+    if (is_ok(ec))
+    {
+        return false;
+    }
+
+    dbg(ec);
+    return true;
+}
+
 struct hs_my_context final
 {
     std::deque<std::string_view>* matches;
@@ -223,7 +286,7 @@ struct hs_my_context final
     hs_my_context(std::deque<std::string_view>& matches,
                   std::string_view data)
         : matches(&matches),
-          data(std::move(data))
+          data(data)
     {
     }
 
@@ -235,7 +298,7 @@ struct hs_my_context final
     hs_my_context& operator=(hs_my_context&& other) noexcept = delete;
 };
 
-int hs_scan_handler(unsigned int, unsigned long long from, unsigned long long to, unsigned int, void* context)
+int hs_scan_handler(unsigned int, const unsigned long long from, const unsigned long long to, unsigned int, void* context)
 {
     auto* const my_context = static_cast<hs_my_context*>(context);
 
@@ -246,22 +309,71 @@ int hs_scan_handler(unsigned int, unsigned long long from, unsigned long long to
     return 1;
 }
 
-std::optional<parsed_uri> parse_uri(const std::string& url)
+using url_result = std::variant<parsed_url, fs::path>;
+
+std::optional<std::variant<parsed_url, fs::path>> parse_url(const std::string& url, const url_result& previous)
 {
-    if (auto m = ctre_url_match(url))
+    if (const auto match = ctre_url_match(url))
     {
-        parsed_uri result;
+        const auto& m = match.value();
+        parsed_url result;
 
-        result.protocol = value_or<2>(m, "http");
-        boost::algorithm::to_lower(result.protocol);
-        result.domain = value_or<3>(m, "");
-        const auto is_secure_protocol = result.protocol == "https" || result.protocol == "wss";
-        result.port = value_or<5>(m, is_secure_protocol ? "443" : "80");
-        result.resource = value_or<6>(m, "/");
-        result.query = value_or<8>(m, "");
-        DEBUG_ASSERT(!result.domain.empty(), assert_module{});
+        result.root = value_or<3>(m, "");
+        result.domain = value_or<5>(m, "");
+        result.port = value_or<7>(m, "");
+        result.target = value_or<8>(m, "");
 
-        return result;
+        result.protocol(value_or<2>(m, ""));
+
+        if (result.domain.empty() && result.root.empty() && result.target.empty())
+        {
+            return std::nullopt;
+        }
+
+        if (result.protocol() == "file")
+        {
+            return std::visit(
+                overloaded
+                {
+                    [](const parsed_url&)
+                    {
+                        fmt::print(FMT_STRING("Web URL references Local Path, security violation."));
+                        return std::nullopt;
+                    },
+                    [&result](const fs::path& path) -> std::optional<fs::path>
+                    {
+                        if (result.root.length() < 2 || !result.root.starts_with('/') || !result.root.ends_with('/'))
+                        {
+                            return std::nullopt;
+                        }
+
+                        if (result.root.length() >= 3)
+                        {
+                            return path.root_path() / result.target;
+                        }
+
+                        return fs::relative(fs::path(result.target), path);
+                    }
+                },
+                previous
+            );
+        }
+
+        return std::visit(
+            overloaded
+            {
+                [&result](const parsed_url& url)
+                {
+                    return result;
+                },
+                [](const fs::path&) -> std::optional<fs::path>
+                {
+                    fmt::print(FMT_STRING("Local Path references Web URL, security violation."));
+                    return std::nullopt;
+                }
+            },
+            previous
+        );
     }
 
     return std::nullopt;
@@ -269,10 +381,11 @@ std::optional<parsed_uri> parse_uri(const std::string& url)
 
 std::optional<std::string> parse_a(const std::string_view& a)
 {
-    if (auto m = ctre_a_match(a))
+    if (const auto match = ctre_a_match(a))
     {
-        std::string result;
-        result = value_or<1>(m, "");
+        const auto& m = match.value();
+
+        auto result = value_or<1>(m, "");
         if (result.empty())
         {
             return std::nullopt;
@@ -284,14 +397,215 @@ std::optional<std::string> parse_a(const std::string_view& a)
     return std::nullopt;
 }
 
-void fetch_web(job_context& context, asio::ip::tcp::resolver& resolver, asio::ssl::stream<beast::tcp_stream>& stream, std::string url, hs_scratch_t* scratch)
+void parse_content(job_context& context, hs_scratch_t* scratch, std::string& body)
 {
+    std::deque<std::string_view> matches;
+
+    hs_my_context my_context{matches, body.data()};
+
+    while (!my_context.data.empty())
+    {
+        const auto ret = hs_scan(
+            database, my_context.data.data(), my_context.data.length(), 0, scratch,
+            hs_scan_handler, &my_context
+        );
+
+        if (ret != HS_SUCCESS && ret != HS_SCAN_TERMINATED)
+        {
+            fmt::print(FMT_STRING("ERROR: Unable to scan input buffer. Exiting.\n"));
+            return;
+        }
+
+        if (ret == HS_SUCCESS)
+        {
+            break;
+        }
+    }
+
+    for (auto&& match : matches)
+    {
+        auto a_opt = parse_a(match);
+        if (!a_opt)
+        {
+            fmt::print(FMT_STRING("* \"{}\" couldn't be parsed as <A /> element\n"), match);
+            continue;
+        }
+
+        context.enqueue(a_opt.value());
+    }
+}
+
+bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::resolver& resolver, asio::io_context& ioc,
+               std::string& url_ref, hs_scratch_t* scratch, const parsed_url& url, beast::flat_buffer& buffer)
+{
+    const auto protocol = url.protocol();
+
+    dbg(protocol);
+    dbg(url.port);
+    dbg(url.domain);
+    dbg(url.target);
+
+    asio::ssl::stream<beast::tcp_stream> stream(ioc, ctx);
+
     beast::error_code ec;
+
+    [[maybe_unused]] sr::scope_exit stream_shutdown{
+        [&stream, &ec]
+        {
+            stream.shutdown(ec);
+        }
+    };
+
+    std::optional<boost::system::error_code> timer_result;
+    asio::deadline_timer timer(ioc);
+    timer.expires_from_now(boost::posix_time::seconds(5), ec);
+
+    if (verify_code(ec))
+    {
+        return false;
+    }
+
+    timer.async_wait(
+        [&timer_result, &stream](const boost::system::error_code& error)
+        {
+            if (error != asio::error::basic_errors::operation_aborted)
+            {
+                beast::get_lowest_layer(stream).cancel();
+            }
+
+            timer_result = error;
+        }
+    );
+
+    boost::certify::set_server_hostname(stream, url.domain, ec);
+
+    if (verify_code(ec))
+    {
+        return false;
+    }
+
+    boost::certify::sni_hostname(stream, url.domain, ec);
+
+    if (verify_code(ec))
+    {
+        return false;
+    }
+
+    // Look up the domain name
+    auto const results = resolver.resolve(url.domain, protocol, ec);
+
+    if (verify_code(ec))
+    {
+        return false;
+    }
+
+    // Make the connection on the IP address we get from a lookup
+    get_lowest_layer(stream).connect(results, ec);
+
+    if (verify_code(ec))
+    {
+        return false;
+    }
+
+    stream.handshake(asio::ssl::stream_base::client, ec);
+
+    if (verify_code(ec))
+    {
+        return false;
+    }
+
+    // Set up an HTTP GET request message
+    beast::http::request<beast::http::string_body> req;
+    req.method(beast::http::verb::get);
+    req.target(url.target);
+    req.set(beast::http::field::host, url.domain);
+    req.set(beast::http::field::accept, beast_accept);
+    req.set(beast::http::field::accept_language, beast_accept_language);
+    req.set(beast::http::field::user_agent, beast_user_agent);
+
+    // Send the HTTP request to the remote host
+    beast::http::write(stream, req, ec);
+
+    if (verify_code(ec))
+    {
+        return false;
+    }
+
+    // Declare a container to hold the response
+    beast::http::response<beast::http::string_body> res;
+    buffer.clear();
+
+    // Receive the HTTP response
+    beast::http::read(stream, buffer, res, ec);
+
+    if (verify_code(ec))
+    {
+        return false;
+    }
+
+    auto result = res.base().result();
+    switch (result)
+    {
+        case beast::http::status::ok:
+        {
+            parse_content(context, scratch, res.body());
+
+            return false;
+        }
+
+        case beast::http::status::found:
+        case beast::http::status::moved_permanently:
+        case beast::http::status::permanent_redirect:
+        case beast::http::status::temporary_redirect:
+        {
+            const auto location = res.base().at(beast::http::field::location);
+            url_ref.assign(location.data(), location.size());
+            return true;
+        }
+
+        default:
+        {
+            std::string v{magic_enum::enum_name<beast::http::status>(result)};
+            dbg(v);
+            return false;
+        }
+    }
+}
+
+thread_local const auto close = [](auto fd) { std::fclose(fd); };
+
+void fetch_file(job_context& context, const fs::path& path, hs_scratch_t* scratch)
+{
+    const auto in_file = sr::make_unique_resource_checked(_wfopen(path.c_str(), L"r"), nullptr, close);
+
+    if (in_file.get() == nullptr)
+    {
+        return;
+    }
+
+    const auto in_view = scn::file(in_file.get());
+
+    const auto file_size = fs::file_size(path);
+    std::string buffer;
+    buffer.reserve(file_size);
+
+    auto it = std::back_inserter(buffer);
+
+    auto range = in_view.wrap();
+    scn::read_into(range, it, file_size);
+
+    parse_content(context, scratch, buffer);
+}
+
+void fetch(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::resolver& resolver, asio::io_context& ioc,
+               std::string url, hs_scratch_t* scratch)
+{
     // This buffer is used for reading and must be persisted
     beast::flat_buffer buffer;
-    do
+    auto new_target = true;
+    while (new_target)
     {
-        const auto parsed_url_opt = parse_uri(url);
+        const auto parsed_url_opt = parse_url(url);
 
         if (!parsed_url_opt)
         {
@@ -299,103 +613,26 @@ void fetch_web(job_context& context, asio::ip::tcp::resolver& resolver, asio::ss
             return;
         }
 
-        const auto& parsed_url = parsed_url_opt.value();
+        const auto& parsed_url_variant = parsed_url_opt.value();
 
-        dbg(parsed_url.protocol);
-        dbg(parsed_url.port);
-        dbg(parsed_url.domain);
-        dbg(parsed_url.resource);
-        dbg(parsed_url.query);
-
-        boost::certify::set_server_hostname(stream, parsed_url.domain);
-        boost::certify::sni_hostname(stream, parsed_url.domain);
-
-        // Look up the domain name
-        auto const results = resolver.resolve(parsed_url.domain, parsed_url.protocol);
-
-        // Make the connection on the IP address we get from a lookup
-        get_lowest_layer(stream).connect(results);
-        stream.handshake(asio::ssl::stream_base::client);
-
-        // Set up an HTTP GET request message
-        beast::http::request<beast::http::string_body> req;
-        req.method(beast::http::verb::get);
-        req.target(parsed_url.resource);
-        req.set(beast::http::field::host, parsed_url.domain);
-        req.set(beast::http::field::accept, beast_accept);
-        req.set(beast::http::field::accept_language, beast_accept_language);
-        req.set(beast::http::field::user_agent, beast_user_agent);
-
-        // Send the HTTP request to the remote host
-        beast::http::write(stream, req);
-
-        // Declare a container to hold the response
-        beast::http::response<beast::http::string_body> res;
-        buffer.clear();
-
-        // Receive the HTTP response
-        beast::http::read(stream, buffer, res, ec);
-
-        auto result = res.base().result();
-        switch (result)
-        {
-            case beast::http::status::ok:
+        new_target = std::visit(
+            overloaded
             {
-                auto& body = res.body();
-                std::deque<std::string_view> matches;
-
-                hs_my_context my_context{matches, body.data()};
-
-                while (!my_context.data.empty())
+                [&context, &ctx, &resolver, &ioc, &url_ref = url, scratch, &buffer](const parsed_url& url)
                 {
-                    const auto ret = hs_scan(
-                        database, my_context.data.data(), my_context.data.length(), 0, scratch,
-                        hs_scan_handler, &my_context
+                    return fetch_web(
+                        context, ctx, resolver, ioc, url_ref, scratch, url, buffer
                     );
-
-                    if (ret != HS_SUCCESS && ret != HS_SCAN_TERMINATED)
-                    {
-                        fmt::print(FMT_STRING("ERROR: Unable to scan input buffer. Exiting.\n"));
-                        return;
-                    }
-
-                    if (ret == HS_SUCCESS)
-                    {
-                        break;
-                    }
-                }
-
-                for (auto && match : matches)
+                },
+                [&context, scratch](const fs::path& path)
                 {
-                    auto a_opt = parse_a(match);
-                    if (!a_opt)
-                    {
-                        fmt::print(FMT_STRING("* \"{}\" couldn't be parsed as <A /> element\n"), match);
-                        continue;
-                    }
-
-                    context.enqueue(a_opt.value());
+                    fetch_file(context, path, scratch);
+                    return false;
                 }
-
-                return;
-            }
-            case beast::http::status::moved_permanently:
-            case beast::http::status::permanent_redirect:
-            case beast::http::status::temporary_redirect:
-            {
-                const auto location = res.base().at(beast::http::field::location);
-                url.assign(location.data(), location.size());
-                break;
-            }
-            default:
-            {
-                std::string v{magic_enum::enum_name<beast::http::status>(result)};
-                dbg(v);
-                return;
-            }
-        }
+            },
+            parsed_url_variant
+        );
     }
-    while (is_ok(ec));
 }
 
 void worker_thread(job_context& context)
@@ -404,7 +641,8 @@ void worker_thread(job_context& context)
     asio::io_context ioc;
 
     // The SSL context is required, and holds certificates
-    asio::ssl::context ctx(asio::ssl::context::tlsv12_client);
+    asio::ssl::context ctx(asio::ssl::context::tls_client);
+    ctx.set_options(asio::ssl::context_base::default_workarounds);
 
     // Verify the remote server's certificate
     ctx.set_verify_mode(asio::ssl::context::verify_peer);
@@ -432,18 +670,16 @@ void worker_thread(job_context& context)
         items_left = found != processed;
         while (context.queue.try_dequeue(url))
         {
+            [[maybe_unused]] sr::scope_exit inc_processed_pages{
+                [&context]
+                {
+                    context.processed_pages.fetch_add(1, std::memory_order_release);
+                }
+            };
+
             items_left = true;
 
-            asio::ssl::stream<beast::tcp_stream> stream(ioc, ctx);
-
-            fetch_web(context, resolver, stream, url, scratch_thread);
-
-            beast::error_code ec;
-            // Gracefully close the socket
-            stream.shutdown(ec);
-
-            // If we get here then the connection is closed gracefully
-            context.processed_pages.fetch_add(1, std::memory_order_release);
+            fetch(context, ctx, resolver, ioc, url, scratch_thread);
         }
     }
     while (items_left);
@@ -468,7 +704,7 @@ struct execute_result final
 void initialize_regex()
 {
     hs_compile_error_t* compile_err;
-    if (hs_compile(R"(<\s*a[^>]*href\s*=\s*".+"[^>]*>)", HS_FLAG_CASELESS | HS_FLAG_SOM_LEFTMOST, HS_MODE_BLOCK, nullptr, &database, &compile_err) != HS_SUCCESS) {
+    if (hs_compile(hscan_a_pattern, HS_FLAG_CASELESS | HS_FLAG_SOM_LEFTMOST, HS_MODE_BLOCK, nullptr, &database, &compile_err) != HS_SUCCESS) {
         fmt::print(FMT_STRING("ERROR: Unable to compile pattern: {}\n"), compile_err->message);
         hs_free_compile_error(compile_err);
         std::exit(1);
@@ -522,8 +758,6 @@ execute_result execute(Input&& in_file)
 
     return result;
 }
-
-thread_local const auto close = [](auto fd) { std::fclose(fd); };
 
 int main() // NOLINT(bugprone-exception-escape)
 {
