@@ -144,6 +144,7 @@ public:
         {
             port = "80";
         }
+
         if (protocol_ == "https" || protocol_ == "wss")
         {
             port = "443";
@@ -155,12 +156,33 @@ public:
     std::string port;
     std::string target;
 
-    explicit parsed_url() = default;
+    explicit parsed_url(const fs::path path)
+        : protocol_("file"), target(path.string())
+    {
+    }
+
+    parsed_url(std::string protocol, std::string root, std::string domain, std::string port, std::string target)
+        : protocol_(std::move(protocol)),
+          root(std::move(root)),
+          domain(std::move(domain)),
+          port(std::move(port)),
+          target(std::move(target))
+    {
+        deduce_port(false);
+    }
+
     ~parsed_url() = default;
     parsed_url(const parsed_url& other) = default;
     parsed_url(parsed_url&& other) noexcept = default;
     parsed_url& operator=(const parsed_url& other) = default;
     parsed_url& operator=(parsed_url&& other) noexcept = default;
+
+    explicit operator std::string() const
+    {
+        auto prefix = protocol_.empty() ? root : fmt::format(FMT_STRING("{}:{}"), protocol_, root);
+        auto host = port.empty() ? domain : fmt::format(FMT_STRING("{}:{}"), domain, port);
+        return fmt::format(FMT_STRING("{}{}{}"), prefix, host, target);
+    }
 };
 
 constexpr char hscan_a_pattern[] = R"R(<\s*a[^>]*href\s*=\s*".+"[^>]*>)R";
@@ -200,6 +222,19 @@ auto ctre_url_match(std::string_view sv)
 }
 
 template <uint32_t Index, typename T>
+auto value_of(T&& match) -> std::string
+{
+    auto&& value = match[Index];
+
+    if (!value.matched)
+    {
+        return "";
+    }
+
+    return value.str();
+}
+
+template <uint32_t Index, typename T>
 auto value_or(T&& match, std::string_view fallback) -> std::string
 {
     auto&& value = match[Index];
@@ -225,7 +260,7 @@ auto value_or(T&& match, std::string_view fallback) -> std::string_view
 }
 #endif
 
-struct job_context
+struct job_context final
 {
     tbb::concurrent_unordered_set<std::string> fetched;
     moodycamel::ConcurrentQueue<std::string> queue;
@@ -311,72 +346,69 @@ int hs_scan_handler(unsigned int, const unsigned long long from, const unsigned 
 
 using url_result = std::variant<parsed_url, fs::path>;
 
-std::optional<std::variant<parsed_url, fs::path>> parse_url(const std::string& url, const url_result& previous)
+std::optional<parsed_url> parse_url(const std::string& url)
 {
     if (const auto match = ctre_url_match(url))
     {
         const auto& m = match.value();
-        parsed_url result;
 
-        result.root = value_or<3>(m, "");
-        result.domain = value_or<5>(m, "");
-        result.port = value_or<7>(m, "");
-        result.target = value_or<8>(m, "");
-
-        result.protocol(value_or<2>(m, ""));
+        parsed_url result
+        {
+            value_of<2>(m),
+            value_of<3>(m),
+            value_of<5>(m),
+            value_of<7>(m),
+            value_of<8>(m),
+        };
 
         if (result.domain.empty() && result.root.empty() && result.target.empty())
         {
             return std::nullopt;
         }
 
-        if (result.protocol() == "file")
+        if (result.target.empty())
         {
-            return std::visit(
-                overloaded
-                {
-                    [](const parsed_url&)
-                    {
-                        fmt::print(FMT_STRING("Web URL references Local Path, security violation."));
-                        return std::nullopt;
-                    },
-                    [&result](const fs::path& path) -> std::optional<fs::path>
-                    {
-                        if (result.root.length() < 2 || !result.root.starts_with('/') || !result.root.ends_with('/'))
-                        {
-                            return std::nullopt;
-                        }
-
-                        if (result.root.length() >= 3)
-                        {
-                            return path.root_path() / result.target;
-                        }
-
-                        return fs::relative(fs::path(result.target), path);
-                    }
-                },
-                previous
-            );
+            result.target = "/";
         }
 
-        return std::visit(
-            overloaded
-            {
-                [&result](const parsed_url& url)
-                {
-                    return result;
-                },
-                [](const fs::path&) -> std::optional<fs::path>
-                {
-                    fmt::print(FMT_STRING("Local Path references Web URL, security violation."));
-                    return std::nullopt;
-                }
-            },
-            previous
-        );
+        return result;
     }
 
     return std::nullopt;
+}
+
+auto rewrite_relative_path(parsed_url& result, const fs::path& previous) -> std::optional<fs::path>
+{
+    if (result.root.length() < 2 || !result.root.starts_with('/') || !result.root.ends_with('/'))
+    {
+        return std::nullopt;
+    }
+
+    if (result.root.length() >= 3)
+    {
+        return fs::absolute(previous.root_path() / result.target);
+    }
+
+    return fs::absolute(fs::relative(fs::path(result.target), previous));
+}
+
+void rewrite_relative_url(parsed_url& result, const parsed_url& previous)
+{
+    if (result.protocol().empty())
+    {
+        if (result.root.length() >= 2 && result.root.starts_with('/') && result.root.ends_with('/'))
+        {
+            // "//blog.google/page"
+        }
+        else
+        {
+            // "/about"
+            result.domain = previous.domain;
+            result.port = previous.port;
+        }
+
+        result.protocol(previous.protocol());
+    }
 }
 
 std::optional<std::string> parse_a(const std::string_view& a)
@@ -397,7 +429,7 @@ std::optional<std::string> parse_a(const std::string_view& a)
     return std::nullopt;
 }
 
-void parse_content(job_context& context, hs_scratch_t* scratch, std::string& body)
+void parse_content(job_context& context, hs_scratch_t* scratch, std::string& body, std::function<std::optional<std::string>(parsed_url&)> callback)
 {
     std::deque<std::string_view> matches;
 
@@ -431,7 +463,24 @@ void parse_content(job_context& context, hs_scratch_t* scratch, std::string& bod
             continue;
         }
 
-        context.enqueue(a_opt.value());
+        auto& href = a_opt.value();
+        auto parsed_href = parse_url(href);
+
+        if (!parsed_href)
+        {
+            fmt::print(FMT_STRING("* \"{}\" couldn't be parsed as a URI address\n"), href);
+            continue;
+        }
+
+        auto processed_href = callback(parsed_href.value());
+
+        if (!processed_href)
+        {
+            fmt::print(FMT_STRING("* \"{}\" address was dropped by callback\n"), href);
+            continue;
+        }
+
+        context.enqueue(processed_href.value());
     }
 }
 
@@ -548,7 +597,15 @@ bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::res
     {
         case beast::http::status::ok:
         {
-            parse_content(context, scratch, res.body());
+            parse_content(
+                context, scratch, res.body(),
+                [&url](auto& href) -> std::optional<std::string>
+                {
+                    rewrite_relative_url(href, url);
+
+                    return std::string{ href };
+                }
+            );
 
             return false;
         }
@@ -574,16 +631,19 @@ bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::res
 
 thread_local const auto close = [](auto fd) { std::fclose(fd); };
 
-void fetch_file(job_context& context, const fs::path& path, hs_scratch_t* scratch)
+void fetch_file(job_context& context, fs::path& path, hs_scratch_t* scratch)
 {
+    path.make_preferred();
+
     const auto in_file = sr::make_unique_resource_checked(_wfopen(path.c_str(), L"r"), nullptr, close);
 
     if (in_file.get() == nullptr)
     {
+        fmt::print(FMT_STRING("File \"{}\" not found.\n"), path.string());
         return;
     }
 
-    const auto in_view = scn::file(in_file.get());
+    scn::file in_view(in_file.get());
 
     const auto file_size = fs::file_size(path);
     std::string buffer;
@@ -591,10 +651,33 @@ void fetch_file(job_context& context, const fs::path& path, hs_scratch_t* scratc
 
     auto it = std::back_inserter(buffer);
 
+#if 1
     auto range = in_view.wrap();
-    scn::read_into(range, it, file_size);
+    const auto ret = scn::read_into(range, it, file_size);
+    if (!ret)
+    {
+        fmt::print(FMT_STRING("Failed to read file \"{}\".\n"), path.string());
+        return;
+    }
+#else
+    auto view = in_view.make_view();
+    std::copy_n(view.begin(), file_size, it);
+#endif
 
-    parse_content(context, scratch, buffer);
+    parse_content(
+        context, scratch, buffer,
+        [&path](auto& href) -> std::optional<std::string>
+        {
+            auto res = rewrite_relative_path(href, path);
+
+            if (!res)
+            {
+                return std::nullopt;
+            }
+
+            return res.value().string();
+        }
+    );
 }
 
 void fetch(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::resolver& resolver, asio::io_context& ioc,
@@ -605,33 +688,30 @@ void fetch(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::resolve
     auto new_target = true;
     while (new_target)
     {
+        new_target = false;
         const auto parsed_url_opt = parse_url(url);
 
         if (!parsed_url_opt)
         {
-            fmt::print(FMT_STRING("Failed to parse \"{}\" as URL\n"), url);
+            fmt::print(FMT_STRING("Failed to parse \"{}\" as an URI address.\n"), url);
             return;
         }
 
         const auto& parsed_url_variant = parsed_url_opt.value();
 
-        new_target = std::visit(
-            overloaded
-            {
-                [&context, &ctx, &resolver, &ioc, &url_ref = url, scratch, &buffer](const parsed_url& url)
-                {
-                    return fetch_web(
-                        context, ctx, resolver, ioc, url_ref, scratch, url, buffer
-                    );
-                },
-                [&context, scratch](const fs::path& path)
-                {
-                    fetch_file(context, path, scratch);
-                    return false;
-                }
-            },
-            parsed_url_variant
-        );
+        if (parsed_url_variant.protocol() == "file")
+        {
+            fs::path path{parsed_url_variant.target};
+            fetch_file(context, path, scratch);
+        }
+        else
+        {
+            new_target = fetch_web(
+                context, ctx, resolver, ioc, url, scratch, parsed_url_variant, buffer
+            );
+
+            // todo: fix redirection page counting
+        }
     }
 }
 
@@ -807,12 +887,20 @@ void test_suite()
     {
         "google.com"_test = []
         {
-            fetch("https://google.com 1"s);
+            fetch("https://google.com 4"s);
         };
 
-        "ya.ru"_test = []
+        skip | "ya.ru"_test = []
         {
             fetch("https://ya.ru 1"s);
+        };
+    };
+
+    "offline"_test = []
+    {
+        "test_data"_test = []
+        {
+            fetch("file://C:/Users/Andrew/Desktop/test_data/0.html 4"s);
         };
     };
 }
