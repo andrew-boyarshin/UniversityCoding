@@ -13,8 +13,10 @@
 #include "unique_resource.h"
 #include "concurrentqueue.h"
 #include "tbb/concurrent_unordered_set.h"
+#include <mio.hpp>
 #include <scn/scn.h>
 #include <fmt/format.h>
+#include <boost/functional/hash.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
@@ -25,7 +27,6 @@
 #include <boost/certify/https_verification.hpp>
 #include <boost/algorithm/string.hpp>
 
-#define NOGDI
 #define USE_CTRE 0
 #define USE_STD_REGEX 1
 
@@ -35,6 +36,7 @@
 #include "plf_nanotimer.h"
 #include "dbg.h"
 #include "hs.h"
+#include "igor.hpp"
 #if USE_STD_REGEX
 #include <regex>
 #elif USE_CTRE
@@ -42,6 +44,8 @@
 #endif
 
 // cppppack: embed point
+
+struct job_context;
 
 struct assert_module : debug_assert::default_handler, debug_assert::set_level<1>
 {
@@ -108,7 +112,7 @@ namespace magic_enum {
     };
 }
 
-struct parsed_url final
+struct parsed_uri final
 {
 private:
     std::string protocol_;
@@ -130,64 +134,293 @@ public:
         protocol_ = protocol;
         boost::algorithm::to_lower(protocol_);
 
-        deduce_port(false);
+        std::visit(
+            [this](auto&& value) { value.deduce_port(protocol_, false); },
+            variant
+        );
     }
 
-    void deduce_port(const bool force = false)
+    struct parsed_link
     {
-        if (!port.empty() && !force)
+        virtual ~parsed_link() = default;
+        virtual void deduce_port(const std::string& protocol, bool force = false) = 0;
+        [[nodiscard]] virtual bool good() const = 0;
+    };
+
+    struct parsed_url final : parsed_link
+    {
+        std::string domain;
+        std::string port;
+        std::string target;
+
+        parsed_url(const std::string& protocol, const std::string_view domain, const std::string_view port, const std::string_view target)
+            : domain(domain),
+              port(port),
+              target(target)
         {
-            return;
+            deduce_port(protocol, false);
         }
 
-        if (protocol_ == "http" || protocol_ == "ws")
+        ~parsed_url() override = default;
+
+        parsed_url(const parsed_url& other) = default;
+        parsed_url(parsed_url&& other) noexcept = default;
+        parsed_url& operator=(const parsed_url& other) = default;
+        parsed_url& operator=(parsed_url&& other) noexcept = default;
+
+        void deduce_port(const std::string& protocol, const bool force = false) override
         {
-            port = "80";
+            if (!port.empty() && !force)
+            {
+                return;
+            }
+
+            if (protocol == "http" || protocol == "ws")
+            {
+                port = "80";
+            }
+
+            if (protocol == "https" || protocol == "wss")
+            {
+                port = "443";
+            }
         }
 
-        if (protocol_ == "https" || protocol_ == "wss")
+        static std::size_t hash_value(const parsed_url& obj)
         {
-            port = "443";
+            std::size_t seed = 0x7CCB4EE8;
+            boost::hash_combine(seed, obj.domain);
+            boost::hash_combine(seed, obj.port);
+            boost::hash_combine(seed, obj.target);
+            return seed;
         }
-    }
 
-    std::string root;
-    std::string domain;
-    std::string port;
-    std::string target;
+        friend std::size_t hash_value(const parsed_url& obj)
+        {
+            return hash_value(obj);
+        }
 
-    explicit parsed_url(const fs::path path)
-        : protocol_("file"), target(path.string())
+        [[nodiscard]] bool good() const override
+        {
+            return !domain.empty() || !target.empty();
+        }
+
+        friend bool operator==(const parsed_url& lhs, const parsed_url& rhs)
+        {
+            return lhs.domain == rhs.domain
+                && lhs.port == rhs.port
+                && lhs.target == rhs.target;
+        }
+
+        friend bool operator!=(const parsed_url& lhs, const parsed_url& rhs)
+        {
+            return !(lhs == rhs);
+        }
+    };
+
+    struct parsed_local final : parsed_link
+    {
+        fs::path path;
+
+        explicit parsed_local(fs::path path)
+            : path(std::move(path))
+        {
+        }
+
+        ~parsed_local() override = default;
+
+        parsed_local(const parsed_local& other) = default;
+        parsed_local(parsed_local&& other) noexcept = default;
+        parsed_local& operator=(const parsed_local& other) = default;
+        parsed_local& operator=(parsed_local&& other) noexcept = default;
+
+        void deduce_port(const std::string&, bool = false) override
+        {
+        }
+
+        [[nodiscard]] bool good() const override
+        {
+            return !path.empty() && fs::exists(path);
+        }
+
+        static std::size_t hash_value(const parsed_local& obj)
+        {
+            std::size_t seed = 0x6D822F9D;
+            boost::hash_combine(seed, obj.path);
+            return seed;
+        }
+
+        friend std::size_t hash_value(const parsed_local& obj)
+        {
+            return hash_value(obj);
+        }
+
+        friend bool operator==(const parsed_local& lhs, const parsed_local& rhs)
+        {
+            return lhs.path == rhs.path;
+        }
+
+        friend bool operator!=(const parsed_local& lhs, const parsed_local& rhs)
+        {
+            return !(lhs == rhs);
+        }
+    };
+
+    struct parsed_placeholder final : parsed_link
+    {
+        explicit parsed_placeholder() = default;
+        ~parsed_placeholder() = default;
+        parsed_placeholder(const parsed_placeholder& other) = default;
+        parsed_placeholder(parsed_placeholder&& other) noexcept = default;
+        parsed_placeholder& operator=(const parsed_placeholder& other) = default;
+        parsed_placeholder& operator=(parsed_placeholder&& other) noexcept = default;
+
+        void deduce_port(const std::string&, bool = false) override
+        {
+        }
+
+        [[nodiscard]] bool good() const override
+        {
+            return false;
+        }
+
+        static std::size_t hash_value(const parsed_placeholder&)
+        {
+            return 0x105FAB96;
+        }
+
+        friend std::size_t hash_value(const parsed_placeholder& obj)
+        {
+            return hash_value(obj);
+        }
+
+        friend bool operator==(const parsed_placeholder&, const parsed_placeholder&)
+        {
+            return true;
+        }
+
+        friend bool operator!=(const parsed_placeholder& lhs, const parsed_placeholder& rhs)
+        {
+            return !(lhs == rhs);
+        }
+    };
+
+    std::variant<parsed_url, parsed_local, parsed_placeholder> variant;
+
+    explicit parsed_uri(fs::path path)
+        : protocol_{"file"},
+          variant{std::in_place_type_t<parsed_local>{}, std::move(path)}
     {
     }
 
-    parsed_url(std::string protocol, std::string root, std::string domain, std::string port, std::string target)
-        : protocol_(std::move(protocol)),
-          root(std::move(root)),
-          domain(std::move(domain)),
-          port(std::move(port)),
-          target(std::move(target))
+    parsed_uri(const std::string_view protocol, std::string_view domain, std::string_view port, std::string_view target)
+        : protocol_{protocol},
+          variant{std::in_place_type_t<parsed_url>{}, protocol_, domain, port, target}
     {
-        deduce_port(false);
     }
 
-    ~parsed_url() = default;
-    parsed_url(const parsed_url& other) = default;
-    parsed_url(parsed_url&& other) noexcept = default;
-    parsed_url& operator=(const parsed_url& other) = default;
-    parsed_url& operator=(parsed_url&& other) noexcept = default;
+    ~parsed_uri() = default;
 
-    explicit operator std::string() const
+    parsed_uri(const parsed_uri& other) = default;
+    parsed_uri(parsed_uri&& other) noexcept = default;
+    parsed_uri& operator=(const parsed_uri& other) = default;
+    parsed_uri& operator=(parsed_uri&& other) noexcept = default;
+
+    [[nodiscard]] bool good() const
     {
-        auto prefix = protocol_.empty() ? root : fmt::format(FMT_STRING("{}:{}"), protocol_, root);
-        auto host = port.empty() ? domain : fmt::format(FMT_STRING("{}:{}"), domain, port);
-        return fmt::format(FMT_STRING("{}{}{}"), prefix, host, target);
+        return std::visit(
+            [](auto&& value) { return value.good(); },
+            variant
+        );
+    }
+
+    static std::size_t hash_value(const parsed_uri& obj);
+
+    friend std::size_t hash_value(const parsed_uri& obj)
+    {
+        return hash_value(obj);
+    }
+
+    friend bool operator==(const parsed_uri& lhs, const parsed_uri& rhs)
+    {
+        return lhs.protocol_ == rhs.protocol_
+            && lhs.variant == rhs.variant;
+    }
+
+    friend bool operator!=(const parsed_uri& lhs, const parsed_uri& rhs)
+    {
+        return !(lhs == rhs);
+    }
+
+    friend void worker_thread(job_context& context);
+
+private:
+    explicit parsed_uri() : variant{std::in_place_type_t<parsed_placeholder>{}}
+    {
     }
 };
 
+namespace std
+{
+    template<>
+    struct hash<parsed_uri::parsed_url>
+    {
+        std::size_t operator()(parsed_uri::parsed_url const& s) const noexcept
+        {
+            return parsed_uri::parsed_url::hash_value(s);
+        }
+    };
+    template<>
+    struct hash<parsed_uri::parsed_local>
+    {
+        std::size_t operator()(parsed_uri::parsed_local const& s) const noexcept
+        {
+            return parsed_uri::parsed_local::hash_value(s);
+        }
+    };
+    template<>
+    struct hash<parsed_uri::parsed_placeholder>
+    {
+        std::size_t operator()(parsed_uri::parsed_placeholder const& s) const noexcept
+        {
+            return parsed_uri::parsed_placeholder::hash_value(s);
+        }
+    };
+    template<>
+    struct hash<parsed_uri>
+    {
+        std::size_t operator()(parsed_uri const& s) const noexcept
+        {
+            return parsed_uri::hash_value(s);
+        }
+    };
+}
+
+namespace tbb
+{
+    template <>
+    class tbb_hash<parsed_uri>
+    {
+    public:
+        std::size_t operator()(parsed_uri const& s) const noexcept
+        {
+            return parsed_uri::hash_value(s);
+        }
+    };
+}
+
+std::size_t parsed_uri::hash_value(const parsed_uri& obj)
+{
+    std::size_t seed = 0x48EB80B7;
+    boost::hash_combine(seed, obj.protocol_);
+    boost::hash_combine(seed, obj.variant);
+    return seed;
+}
+
 constexpr char hscan_a_pattern[] = R"R(<\s*a[^>]*href\s*=\s*".+"[^>]*>)R";
 constexpr char regex_a_pattern[] = R"R(<\s*a[^>]*href\s*=\s*"(.+?)"[^>]*>)R";
-constexpr char regex_url_pattern[] = R"R(^(([filehttpsw]{2,5}):)?(/+)(([^\s:/?#\[\]!$&'\(\)*+,;=]+\.[^\s:/?#\[\]!$&'\(\)*+,;=]+)(:(\d+))?)?([^\s?]*?(\?\S*)?)$)R";
+constexpr char regex_url_pattern[] = R"R(^(([https]{4,5}):)?(/*)(([^\s:/?#\[\]!$&'\(\)*+,;=]+\.[^\s:/?#\[\]!$&'\(\)*+,;=]+)(:(\d+))?)?([^\s?]*(\?\S*)?)$)R";
+constexpr char regex_local_pattern[] = R"R(^(([filehttpsw]{2,5}):)?(/+)(([^\s:/?#\[\]!$&'\(\)*+,;=]+\.[^\s:/?#\[\]!$&'\(\)*+,;=]+)(:(\d+))?)?([^\s?]*?(\?\S*)?)$)R";
 
 #if USE_STD_REGEX
 static const std::regex ctre_a_pattern{
@@ -262,8 +495,8 @@ auto value_or(T&& match, std::string_view fallback) -> std::string_view
 
 struct job_context final
 {
-    tbb::concurrent_unordered_set<std::string> fetched;
-    moodycamel::ConcurrentQueue<std::string> queue;
+    tbb::concurrent_unordered_set<parsed_uri> fetched;
+    moodycamel::ConcurrentQueue<parsed_uri> queue;
     std::atomic<std::uint64_t> found_pages;
     std::atomic<std::uint64_t> processed_pages;
 
@@ -344,71 +577,197 @@ int hs_scan_handler(unsigned int, const unsigned long long from, const unsigned 
     return 1;
 }
 
-using url_result = std::variant<parsed_url, fs::path>;
-
-std::optional<parsed_url> parse_url(const std::string& url)
+struct referrer_tag
 {
-    if (const auto match = ctre_url_match(url))
-    {
-        const auto& m = match.value();
+};
 
-        parsed_url result
-        {
-            value_of<2>(m),
-            value_of<3>(m),
-            value_of<5>(m),
-            value_of<7>(m),
-            value_of<8>(m),
-        };
+inline constexpr auto referrer = igor::named_argument<referrer_tag>{};
 
-        if (result.domain.empty() && result.root.empty() && result.target.empty())
-        {
-            return std::nullopt;
-        }
+constexpr std::array<std::string_view, 3> protocol_prefixes = {
+    "http://",
+    "https://",
+    "file://"
+};
 
-        if (result.target.empty())
-        {
-            result.target = "/";
-        }
-
-        return result;
-    }
-
-    return std::nullopt;
-}
-
-auto rewrite_relative_path(parsed_url& result, const fs::path& previous) -> std::optional<fs::path>
+template <typename... Args>
+std::optional<parsed_uri> parse_url(std::string_view url, Args&&... args)
 {
-    if (result.root.length() < 2 || !result.root.starts_with('/') || !result.root.ends_with('/'))
+    if (url.starts_with('#'))
     {
         return std::nullopt;
     }
 
-    if (result.root.length() >= 3)
+    igor::parser p{ args... };
+    auto& referrer = p(::referrer);
+
+    auto root_slash_count = 0;
+    std::string_view protocol;
+    for (auto && prefix : protocol_prefixes)
     {
-        return fs::absolute(previous.root_path() / result.target);
+        if (url.starts_with(prefix))
+        {
+            protocol = url.substr(0, url.find(':'));
+            root_slash_count = -2;
+            url.remove_prefix(protocol.length());
+            break;
+        }
     }
 
-    return fs::absolute(fs::relative(fs::path(result.target), previous));
-}
+    constexpr auto have_referrer = p.has(::referrer);
 
-void rewrite_relative_url(parsed_url& result, const parsed_url& previous)
-{
-    if (result.protocol().empty())
+    if constexpr (have_referrer)
     {
-        if (result.root.length() >= 2 && result.root.starts_with('/') && result.root.ends_with('/'))
+        if (protocol.empty() && referrer.good())
         {
-            // "//blog.google/page"
+            protocol = referrer.protocol();
         }
-        else
+    }
+
+    if (protocol.empty())
+    {
+        return std::nullopt;
+    }
+
+    const auto local = protocol == "file";
+
+    if (url.front() == ':')
+    {
+        url.remove_prefix(1);
+    }
+
+    while (!url.empty() && url.front() == '/')
+    {
+        url.remove_prefix(1);
+        root_slash_count++;
+    }
+
+    if (local)
+    {
+        fs::path path{ url };
+
+        if constexpr (have_referrer)
         {
-            // "/about"
-            result.domain = previous.domain;
-            result.port = previous.port;
+            if (!path.is_absolute() || !fs::exists(path))
+            {
+                if (root_slash_count > 0)
+                {
+                    std::visit(
+                        overloaded
+                        {
+                            [&path](const parsed_uri::parsed_local& referrer_local)
+                            {
+                                path = referrer_local.path.root_path() / path;
+                            },
+                            [](auto&&)
+                            {
+                                fmt::print(FMT_STRING("URI target zone mismatch"));
+                            },
+                        },
+                        referrer.variant
+                    );
+                }
+                else
+                {
+                    std::visit(
+                        overloaded
+                        {
+                            [&path](const parsed_uri::parsed_local& referrer_local)
+                            {
+                                path = referrer_local.path.parent_path() / path;
+                            },
+                            [](auto&&)
+                            {
+                                fmt::print(FMT_STRING("URI target zone mismatch"));
+                            },
+                        },
+                        referrer.variant
+                    );
+                }
+            }
         }
 
-        result.protocol(previous.protocol());
+        path = fs::absolute(path);
+
+        if (!fs::exists(path))
+        {
+            return std::nullopt;
+        }
+
+        return parsed_uri{path};
     }
+
+    const auto port_colon_pos = url.find(':');
+
+    std::string_view domain;
+    std::string_view port;
+
+    constexpr auto npos = decltype(url)::npos;
+    if (port_colon_pos != npos)
+    {
+        const auto next_part_pos = url.find_first_of("/?");
+
+        // "//blog.google/q?v=https://test.com:443/a"
+        auto next_part_ok = next_part_pos == npos || next_part_pos > port_colon_pos;
+        if (next_part_ok)
+        {
+            domain = url.substr(0, port_colon_pos);
+            url.remove_prefix(port_colon_pos + 1);
+            const auto port_end = url.find_first_not_of("0123456789");
+            port = url.substr(0, port_end);
+            url.remove_prefix(std::min(port_end, url.size()));
+        }
+    }
+
+    if (domain.empty())
+    {
+        if (root_slash_count == 0)
+        {
+            const auto domain_end = url.find_first_of("/?");
+            domain = url.substr(0, domain_end);
+            url.remove_prefix(std::min(domain_end, url.size()));
+        }
+        else if (root_slash_count > 0)
+        {
+            if constexpr (have_referrer)
+            {
+                std::visit(
+                    overloaded
+                    {
+                        [&domain, &port](const parsed_uri::parsed_url& referrer_url)
+                        {
+                            domain = referrer_url.domain;
+                            port = referrer_url.port;
+                        },
+                        [](auto&&)
+                        {
+                            fmt::print(FMT_STRING("URI target zone mismatch"));
+                        },
+                    },
+                    referrer.variant
+                );
+            }
+        }
+    }
+
+    auto target = url;
+
+    if (!domain.empty() || root_slash_count >= 1 || !target.empty())
+    {
+        if (target.empty())
+        {
+            target = "/";
+        }
+
+        return parsed_uri
+        {
+            protocol,
+            domain,
+            port,
+            target
+        };
+    }
+
+    return std::nullopt;
 }
 
 std::optional<std::string> parse_a(const std::string_view& a)
@@ -429,11 +788,11 @@ std::optional<std::string> parse_a(const std::string_view& a)
     return std::nullopt;
 }
 
-void parse_content(job_context& context, hs_scratch_t* scratch, std::string& body, std::function<std::optional<std::string>(parsed_url&)> callback)
+void parse_content(job_context& context, hs_scratch_t* scratch, std::string_view body, const parsed_uri& url)
 {
     std::deque<std::string_view> matches;
 
-    hs_my_context my_context{matches, body.data()};
+    hs_my_context my_context{matches, body};
 
     while (!my_context.data.empty())
     {
@@ -464,7 +823,7 @@ void parse_content(job_context& context, hs_scratch_t* scratch, std::string& bod
         }
 
         auto& href = a_opt.value();
-        auto parsed_href = parse_url(href);
+        auto parsed_href = parse_url(href, referrer = url);
 
         if (!parsed_href)
         {
@@ -472,28 +831,13 @@ void parse_content(job_context& context, hs_scratch_t* scratch, std::string& bod
             continue;
         }
 
-        auto processed_href = callback(parsed_href.value());
-
-        if (!processed_href)
-        {
-            fmt::print(FMT_STRING("* \"{}\" address was dropped by callback\n"), href);
-            continue;
-        }
-
-        context.enqueue(processed_href.value());
+        context.enqueue(parsed_href.value());
     }
 }
 
-bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::resolver& resolver, asio::io_context& ioc,
-               std::string& url_ref, hs_scratch_t* scratch, const parsed_url& url, beast::flat_buffer& buffer)
+void fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::resolver& resolver, asio::io_context& ioc,
+               hs_scratch_t* scratch, const parsed_uri& uri, beast::flat_buffer& buffer)
 {
-    const auto protocol = url.protocol();
-
-    dbg(protocol);
-    dbg(url.port);
-    dbg(url.domain);
-    dbg(url.target);
-
     asio::ssl::stream<beast::tcp_stream> stream(ioc, ctx);
 
     beast::error_code ec;
@@ -511,7 +855,7 @@ bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::res
 
     if (verify_code(ec))
     {
-        return false;
+        return;
     }
 
     timer.async_wait(
@@ -526,26 +870,28 @@ bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::res
         }
     );
 
+    auto& url = std::get<parsed_uri::parsed_url>(uri.variant);
+
     boost::certify::set_server_hostname(stream, url.domain, ec);
 
     if (verify_code(ec))
     {
-        return false;
+        return;
     }
 
     boost::certify::sni_hostname(stream, url.domain, ec);
 
     if (verify_code(ec))
     {
-        return false;
+        return;
     }
 
     // Look up the domain name
-    auto const results = resolver.resolve(url.domain, protocol, ec);
+    auto const results = resolver.resolve(url.domain, uri.protocol(), ec);
 
     if (verify_code(ec))
     {
-        return false;
+        return;
     }
 
     // Make the connection on the IP address we get from a lookup
@@ -553,14 +899,14 @@ bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::res
 
     if (verify_code(ec))
     {
-        return false;
+        return;
     }
 
     stream.handshake(asio::ssl::stream_base::client, ec);
 
     if (verify_code(ec))
     {
-        return false;
+        return;
     }
 
     // Set up an HTTP GET request message
@@ -577,7 +923,7 @@ bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::res
 
     if (verify_code(ec))
     {
-        return false;
+        return;
     }
 
     // Declare a container to hold the response
@@ -589,7 +935,7 @@ bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::res
 
     if (verify_code(ec))
     {
-        return false;
+        return;
     }
 
     auto result = res.base().result();
@@ -597,17 +943,9 @@ bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::res
     {
         case beast::http::status::ok:
         {
-            parse_content(
-                context, scratch, res.body(),
-                [&url](auto& href) -> std::optional<std::string>
-                {
-                    rewrite_relative_url(href, url);
+            parse_content(context, scratch, res.body(), uri);
 
-                    return std::string{ href };
-                }
-            );
-
-            return false;
+            break;
         }
 
         case beast::http::status::found:
@@ -616,102 +954,61 @@ bool fetch_web(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::res
         case beast::http::status::temporary_redirect:
         {
             const auto location = res.base().at(beast::http::field::location);
-            url_ref.assign(location.data(), location.size());
-            return true;
+            const auto target_url = parse_url(location, referrer = uri);
+            if (!target_url)
+            {
+                // todo
+                break;
+            }
+            context.enqueue(target_url.value());
+            break;
         }
 
         default:
         {
             std::string v{magic_enum::enum_name<beast::http::status>(result)};
             dbg(v);
-            return false;
+            break;
         }
     }
 }
 
 thread_local const auto close = [](auto fd) { std::fclose(fd); };
 
-void fetch_file(job_context& context, fs::path& path, hs_scratch_t* scratch)
+void fetch_file(job_context& context, const parsed_uri& uri, hs_scratch_t* scratch)
 {
-    path.make_preferred();
+    const auto& uri_local = std::get<parsed_uri::parsed_local>(uri.variant);
+    const auto& path = uri_local.path;
 
-    const auto in_file = sr::make_unique_resource_checked(_wfopen(path.c_str(), L"r"), nullptr, close);
+    std::error_code error;
+    const auto mmap = ::mio::make_mmap_source(path.native(), error);
 
-    if (in_file.get() == nullptr)
+    if (error)
     {
-        fmt::print(FMT_STRING("File \"{}\" not found.\n"), path.string());
+        fmt::print(FMT_STRING("File \"{}\" cannot be opened ({}).\n"), path.string(), error.message());
         return;
     }
 
-    scn::file in_view(in_file.get());
-
-    const auto file_size = fs::file_size(path);
-    std::string buffer;
-    buffer.reserve(file_size);
-
-    auto it = std::back_inserter(buffer);
-
-#if 1
-    auto range = in_view.wrap();
-    const auto ret = scn::read_into(range, it, file_size);
-    if (!ret)
-    {
-        fmt::print(FMT_STRING("Failed to read file \"{}\".\n"), path.string());
-        return;
-    }
-#else
-    auto view = in_view.make_view();
-    std::copy_n(view.begin(), file_size, it);
-#endif
-
-    parse_content(
-        context, scratch, buffer,
-        [&path](auto& href) -> std::optional<std::string>
-        {
-            auto res = rewrite_relative_path(href, path);
-
-            if (!res)
-            {
-                return std::nullopt;
-            }
-
-            return res.value().string();
-        }
-    );
+    parse_content(context, scratch, {mmap.data(), mmap.length()}, uri);
 }
 
 void fetch(job_context& context, asio::ssl::context& ctx, asio::ip::tcp::resolver& resolver, asio::io_context& ioc,
-               std::string url, hs_scratch_t* scratch)
+           const parsed_uri& url, hs_scratch_t* scratch)
 {
     // This buffer is used for reading and must be persisted
     beast::flat_buffer buffer;
-    auto new_target = true;
-    while (new_target)
-    {
-        new_target = false;
-        const auto parsed_url_opt = parse_url(url);
 
-        if (!parsed_url_opt)
-        {
+#if 0
             fmt::print(FMT_STRING("Failed to parse \"{}\" as an URI address.\n"), url);
-            return;
-        }
+#endif
 
-        const auto& parsed_url_variant = parsed_url_opt.value();
-
-        if (parsed_url_variant.protocol() == "file")
-        {
-            fs::path path{parsed_url_variant.target};
-            fetch_file(context, path, scratch);
-        }
-        else
-        {
-            new_target = fetch_web(
-                context, ctx, resolver, ioc, url, scratch, parsed_url_variant, buffer
-            );
-
-            // todo: fix redirection page counting
-        }
+    if (url.protocol() == "file")
+    {
+        fetch_file(context, url, scratch);
+    }
+    else
+    {
+        fetch_web(context, ctx, resolver, ioc, scratch, url, buffer);
     }
 }
 
@@ -739,7 +1036,7 @@ void worker_thread(job_context& context)
         std::exit(1);
     }
 
-    std::string url;
+    parsed_uri url;
 
     bool items_left;
     do
@@ -821,7 +1118,14 @@ execute_result execute(Input&& in_file)
     std::size_t jobs;
     DEBUG_ASSERT(scn::scan(in_file, "{} {}", start_url, jobs), assert_module{});
 
-    context.enqueue(start_url);
+    auto url = parse_url(start_url);
+
+    if (!url)
+    {
+        // todo
+    }
+
+    context.enqueue(url.value());
 
     for (decltype(jobs) i = 0; i < jobs; ++i)
     {
@@ -867,15 +1171,17 @@ int main() // NOLINT(bugprone-exception-escape)
 
 #pragma warning( push )
 #pragma warning( disable : 26444 )
-template <typename T>
-void fetch(T&& url)
+template <typename T, typename Count>
+void fetch(T&& url, Count&& count, double time_bound)
 {
     using namespace boost::ut;
     auto result = execute(scn::make_view(url));
-    expect(result.pages_crawled == 1_ul);
-    const auto elapsed_ns = result.timer.get_elapsed_ns();
-    expect(elapsed_ns > 0._d);
-    boost::ut::log << elapsed_ns;
+    expect(eq(result.pages_crawled, count));
+    const auto elapsed_ms = result.timer.get_elapsed_ms();
+    expect(elapsed_ms > 0._d);
+    expect(le(elapsed_ms, time_bound));
+    //boost::ut::log << elapsed_ns;
+    fmt::print(FMT_STRING("> {} ms\n"), elapsed_ms);
 };
 
 void test_suite()
@@ -885,22 +1191,42 @@ void test_suite()
 
     "online"_test = []
     {
-        "google.com"_test = []
+        skip | "google.com"_test = []
         {
-            fetch("https://google.com 4"s);
+            fetch("https://google.com 4"s, 1, 1000. * 1000);
         };
 
         skip | "ya.ru"_test = []
         {
-            fetch("https://ya.ru 1"s);
+            fetch("https://ya.ru 6"s, 1, 1000. * 1000);
         };
     };
 
     "offline"_test = []
     {
-        "test_data"_test = []
+        skip | "test_data(1)"_test = []
         {
-            fetch("file://C:/Users/Andrew/Desktop/test_data/0.html 4"s);
+            fetch("file://C:/Users/Andrew/Desktop/test_data/0.html 1"s, 500, 7. * 1000);
+        };
+        skip | "test_data(2)"_test = []
+        {
+            fetch("file://C:/Users/Andrew/Desktop/test_data/0.html 2"s, 500, 5. * 1000);
+        };
+        "test_data(4)"_test = []
+        {
+            fetch("file://C:/Users/Andrew/Desktop/test_data/0.html 4"s, 500, 2. * 1000);
+        };
+        "test_data(5)"_test = []
+        {
+            fetch("file://C:/Users/Andrew/Desktop/test_data/0.html 5"s, 500, 2. * 1000);
+        };
+        "test_data(6)"_test = []
+        {
+            fetch("file://C:/Users/Andrew/Desktop/test_data/0.html 6"s, 500, 2. * 1000);
+        };
+        "test_data(7)"_test = []
+        {
+            fetch("file://C:/Users/Andrew/Desktop/test_data/0.html 7"s, 500, 2. * 1000);
         };
     };
 }

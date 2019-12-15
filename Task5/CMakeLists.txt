@@ -106,9 +106,6 @@ if (XCODE OR CMAKE_CXX_COMPILER_ID MATCHES "Intel")
 endif ()
 
 set(CMAKE_INCLUDE_CURRENT_DIR 1)
-include_directories(${PROJECT_SOURCE_DIR}/src)
-include_directories(${PROJECT_BINARY_DIR})
-include_directories(SYSTEM include)
 
 include (${CMAKE_MODULE_PATH}/boost.cmake)
 
@@ -154,8 +151,6 @@ endif ()
 if (OPTIMISE)
     set(HS_OPTIMIZE ON)
 endif()
-
-CMAKE_DEPENDENT_OPTION(DUMP_SUPPORT "Dump code support; normally on, except in release builds" ON "NOT RELEASE_BUILD" OFF)
 
 CMAKE_DEPENDENT_OPTION(DISABLE_ASSERTS "Disable assert(); Asserts are enabled in debug builds, disabled in release builds" OFF "NOT RELEASE_BUILD" ON)
 
@@ -770,57 +765,6 @@ SET (hs_compile_SRCS
     src/util/verify_types.h
 )
 
-set(hs_dump_SRCS
-    src/scratch_dump.cpp
-    src/scratch_dump.h
-    src/fdr/fdr_dump.cpp
-    src/hwlm/hwlm_dump.cpp
-    src/hwlm/hwlm_dump.h
-    src/nfa/accel_dump.cpp
-    src/nfa/accel_dump.h
-    src/nfa/castle_dump.cpp
-    src/nfa/castle_dump.h
-    src/nfagraph/ng_dump.cpp
-    src/nfagraph/ng_dump.h
-    src/nfa/goughcompile_dump.cpp
-    src/nfa/goughcompile_dump.h
-    src/nfa/goughdump.cpp
-    src/nfa/goughdump.h
-    src/nfa/lbr_dump.cpp
-    src/nfa/limex_dump.cpp
-    src/nfa/mcclellandump.cpp
-    src/nfa/mcclellandump.h
-    src/nfa/mcsheng_dump.cpp
-    src/nfa/mcsheng_dump.h
-    src/nfa/mpv_dump.cpp
-    src/nfa/nfa_dump_api.h
-    src/nfa/nfa_dump_dispatch.cpp
-    src/nfa/nfa_dump_internal.cpp
-    src/nfa/nfa_dump_internal.h
-    src/nfa/shengdump.cpp
-    src/nfa/shengdump.h
-    src/nfa/tamarama_dump.cpp
-    src/nfa/tamarama_dump.h
-    src/parser/dump.cpp
-    src/parser/dump.h
-    src/parser/position_dump.h
-    src/smallwrite/smallwrite_dump.cpp
-    src/smallwrite/smallwrite_dump.h
-    src/som/slot_manager_dump.cpp
-    src/som/slot_manager_dump.h
-    src/rose/rose_build_dump.cpp
-    src/rose/rose_build_dump.h
-    src/rose/rose_in_dump.cpp
-    src/rose/rose_in_dump.h
-    src/util/dump_charclass.cpp
-    src/util/dump_charclass.h
-    src/util/dump_util.cpp
-    src/util/dump_util.h
-)
-
-if (DUMP_SUPPORT)
-    set(hs_compile_SRCS ${hs_compile_SRCS} ${hs_dump_SRCS})
-endif()
 
 # we group things by sublibraries, specifying shared and static and then
 # choose which ones to build
@@ -834,73 +778,18 @@ if (HAVE_AVX2)
     set(hs_exec_SRCS ${hs_exec_SRCS} ${hs_exec_avx2_SRCS})
 endif()
 
-if (BUILD_STATIC_LIBS)
-    add_library(hs_exec OBJECT ${hs_exec_SRCS})
-
-    add_library(hs_runtime STATIC src/hs_version.c src/hs_valid_platform.c $<TARGET_OBJECTS:hs_exec>)
-    set_target_properties(hs_runtime PROPERTIES LINKER_LANGUAGE C)
-
-    add_library(hs_compile OBJECT ${hs_compile_SRCS})
-
-    add_library(hs STATIC
-        src/hs_version.c
-        src/hs_valid_platform.c
-        $<TARGET_OBJECTS:hs_exec>
-        $<TARGET_OBJECTS:hs_compile>)
-endif (BUILD_STATIC_LIBS)
-
-if (NOT BUILD_SHARED_LIBS)
-    install(TARGETS hs_runtime DESTINATION ${CMAKE_INSTALL_LIBDIR})
-endif()
-
-if (BUILD_STATIC_LIBS)
-    add_dependencies(hs ragel_Parser)
-endif ()
-
-if (NOT BUILD_SHARED_LIBS)
-    install(TARGETS hs DESTINATION ${CMAKE_INSTALL_LIBDIR})
-endif()
-
-target_link_libraries(hs_exec ${Boost_LIBRARIES})
-target_link_libraries(hs_runtime ${Boost_LIBRARIES})
-target_link_libraries(hs_compile ${Boost_LIBRARIES})
-target_link_libraries(hs ${Boost_LIBRARIES})
-
-target_include_directories(hs_exec PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-    ${CMAKE_CURRENT_BINARY_DIR}
-    ${Boost_INCLUDE_DIRS}
-)
-
-target_include_directories(hs_runtime PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-    ${CMAKE_CURRENT_BINARY_DIR}
-    ${Boost_INCLUDE_DIRS}
-)
-
-target_include_directories(hs_compile PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-    ${CMAKE_CURRENT_BINARY_DIR}
-    ${Boost_INCLUDE_DIRS}
-)
-
-target_include_directories(hs PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-    ${CMAKE_CURRENT_BINARY_DIR}
-    ${Boost_INCLUDE_DIRS}
-)
-
 add_executable (Task5
     "Task5.cpp"
     ${tbb_src}
+    ${hs_exec_SRCS}
+    src/hs_version.c
+    src/hs_valid_platform.c
+    ${hs_compile_SRCS}
 )
 
+add_dependencies(Task5 ragel_Parser)
+
 target_link_libraries(Task5
-    hs
     ${Boost_LIBRARIES}
     Crypt32.lib
     Threads::Threads
@@ -922,9 +811,23 @@ target_compile_definitions (Task5 PUBLIC
     DBG_MACRO_NO_WARNING
     _CRT_SECURE_NO_WARNINGS
     BOOST_DETAIL_NO_CONTAINER_FWD
+    BOOST_BEAST_USE_STD_STRING_VIEW
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    NOGDI
+    NOSOUND
+    NODRAWTEXT
+    NOMB
+    NOMETAFILE
+    NOSCROLL
+    NOTEXTMETRIC
+    NOHELP
+    NODEFERWINDOWPOS
+    NOMCX
 )
 
 target_compile_features (Task5 PUBLIC cxx_std_20)
+target_compile_options (Task5 PUBLIC $<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:/Zc:__cplusplus>)
 
 if (UNIX)
   execute_process (COMMAND date "+%a, %d %b %Y %H:%M:%S %z"
@@ -943,14 +846,11 @@ elseif (WIN32)
     
     check_cxx_compiler_flag ("/volatile:iso" SUPPORTS_VOLATILE_FLAG)
     if (SUPPORTS_VOLATILE_FLAG)
-        target_compile_options (Task5 PUBLIC "/volatile:iso")
+        target_compile_options (Task5 PUBLIC $<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:/volatile:iso>)
     endif ()
     
     set(MSVC_WARNS /wd4101 /wd4146 /wd4172 /wd4200 /wd4244 /wd4267 /wd4307 /wd4334 /wd4805 /wd4996 /wd4800)
-    target_compile_options (hs_exec PUBLIC ${MSVC_WARNS})
-    target_compile_options (hs_runtime PUBLIC ${MSVC_WARNS})
-    target_compile_options (hs_compile PUBLIC ${MSVC_WARNS})
-    target_compile_options (hs PUBLIC ${MSVC_WARNS})
+    target_compile_options (Task5 PUBLIC $<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:${MSVC_WARNS}>)
 else ()
   set (_configure_date "Unknown")
 endif()
